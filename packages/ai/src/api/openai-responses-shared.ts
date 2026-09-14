@@ -184,6 +184,13 @@ export function convertResponsesMessages<TApi extends Api>(
 	let msgIndex = 0;
 	for (const msg of transformedMessages) {
 		if (msg.role === "user") {
+			if (msg.openaiCompaction) {
+				// DO. NOT. BREAK. CACHE PREFIXING. This is the entire canonical returned
+				// window. Do not filter, normalize IDs, extract only ciphertext, or add
+				// a prose summary in front. Normal turns append after this exact prefix.
+				messages.push(...(structuredClone(msg.openaiCompaction.output) as unknown as ResponseInput));
+				continue;
+			}
 			if (typeof msg.content === "string") {
 				messages.push({
 					role: "user",

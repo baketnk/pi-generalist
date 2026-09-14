@@ -67,6 +67,7 @@ export type {
 	BuildSystemPromptOptions,
 	CompactOptions,
 	ContextEvent,
+	ContextSnapshotEvent,
 	ContextUsage,
 	CustomToolCallEvent,
 	EditToolCallEvent,

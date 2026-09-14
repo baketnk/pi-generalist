@@ -4,7 +4,7 @@ import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 /** Wrap a ToolDefinition into an AgentTool for the core runtime. */
 export function wrapToolDefinition<TDetails = unknown>(
 	definition: ToolDefinition<any, TDetails>,
-	ctxFactory?: () => ExtensionContext,
+	ctxFactory?: (signal?: AbortSignal) => ExtensionContext,
 ): AgentTool<any, TDetails> {
 	return {
 		name: definition.name,
@@ -14,8 +14,15 @@ export function wrapToolDefinition<TDetails = unknown>(
 		constrainedSampling: definition.constrainedSampling,
 		prepareArguments: definition.prepareArguments,
 		executionMode: definition.executionMode,
-		execute: (toolCallId, params, signal, onUpdate, ctx?: ExtensionContext) =>
-			definition.execute(toolCallId, params, signal, onUpdate, ctx ?? (ctxFactory?.() as ExtensionContext)),
+		nestedTools: definition.nestedTools,
+		execute: (toolCallId, params, signal, onUpdate, execution) => {
+			// AgentTool factories can themselves be registered as ToolDefinitions. In
+			// that case the fifth argument is already the extension context.
+			const ctx =
+				ctxFactory?.(signal) ?? (execution && "cwd" in execution ? (execution as ExtensionContext) : undefined);
+			if (ctx && execution) ctx.tools = execution.tools;
+			return definition.execute(toolCallId, params, signal, onUpdate, ctx as ExtensionContext);
+		},
 	};
 }
 
@@ -42,6 +49,8 @@ export function createToolDefinitionFromAgentTool(tool: AgentTool<any>): ToolDef
 		constrainedSampling: tool.constrainedSampling,
 		prepareArguments: tool.prepareArguments,
 		executionMode: tool.executionMode,
-		execute: async (toolCallId, params, signal, onUpdate) => tool.execute(toolCallId, params, signal, onUpdate),
+		nestedTools: tool.nestedTools,
+		execute: async (toolCallId, params, signal, onUpdate, ctx) =>
+			tool.execute(toolCallId, params, signal, onUpdate, ctx),
 	};
 }

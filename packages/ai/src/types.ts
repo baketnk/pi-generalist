@@ -120,6 +120,19 @@ export interface ProviderResponse {
 	headers: Record<string, string>;
 }
 
+/** Logical identity for one top-level agent request and its provider continuations. */
+export interface AgentRequestIdentity {
+	sessionId: string;
+	threadId: string;
+	turnId: string;
+	requestKind: "turn" | "compaction";
+	startedAt: number;
+	installationId?: string;
+	windowId?: string;
+	contextWindowId?: string;
+	windowNumber?: number;
+}
+
 /** Authentication, HTTP transport, and lifecycle callbacks shared by provider requests. */
 export interface ProviderRequestOptions<TModel = Model<Api>> {
 	signal?: AbortSignal;
@@ -208,6 +221,8 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	 * session-aware features. Ignored by providers that don't support it.
 	 */
 	sessionId?: string;
+	/** Logical request identity for provider attribution, independent of cache identity. */
+	requestIdentity?: AgentRequestIdentity;
 	/**
 	 * WebSocket connect timeout in milliseconds for providers that support
 	 * WebSocket transports. This covers the connection/open handshake only;
@@ -419,7 +434,22 @@ export interface DeferredHandle {
 	data?: JsonValue;
 }
 
+/** Complete provider-returned compacted window; never extract just the encrypted item. */
+export interface OpenAICompaction {
+	api: "openai-responses" | "openai-codex-responses";
+	provider: string;
+	model: string;
+	baseUrl: string;
+	output: JsonValue[];
+	/** Provider output-token accounting, used only as an estimate until the next normal response. */
+	outputTokens?: number;
+}
+
+export type UncompactedMessage = Omit<UserMessage, "openaiCompaction"> | AssistantMessage | ToolResultMessage;
+
 export interface UserMessage {
+	/** Runtime projection of a durable compaction checkpoint. Fallback is reconstructed from the journal. */
+	openaiCompaction?: OpenAICompaction & { fallback: UncompactedMessage[] };
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
 	timestamp: number; // Unix timestamp in milliseconds

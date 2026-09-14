@@ -272,6 +272,31 @@ function createClient(
 	});
 }
 
+/** Public compact schema deliberately excludes Codex-only tools/reasoning/client_metadata. */
+export async function buildCompactionRequest(
+	model: Model<"openai-responses">,
+	context: Context,
+	options: SimpleStreamOptions,
+) {
+	const apiKey = getClientApiKey(model.provider, options.apiKey, options.headers);
+	const { input } = buildParams(model, { ...context, systemPrompt: undefined }, options);
+	let body: unknown = {
+		model: model.id,
+		input,
+		instructions: context.systemPrompt,
+		prompt_cache_key: options.cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options.sessionId),
+	};
+	body = (await options.onPayload?.(body, model)) ?? body;
+	const headers = new Headers({ "User-Agent": getPiUserAgent(), Authorization: `Bearer ${apiKey}`, ...model.headers });
+	for (const [key, value] of Object.entries(options.headers ?? {})) {
+		if (value === null) headers.delete(key);
+		else headers.set(key, value);
+	}
+	headers.set("content-type", "application/json");
+	headers.set("accept", "application/json");
+	return { url: `${model.baseUrl.replace(/\/$/, "")}/responses/compact`, headers, body, onResponse: undefined };
+}
+
 function buildParams(
 	model: Model<"openai-responses">,
 	context: Context,

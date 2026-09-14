@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
+import { expandIncompatibleCompactions } from "@earendil-works/pi-ai/utils/openai-compaction";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
@@ -11,6 +12,7 @@ import { convertToLlm } from "./messages.ts";
 import { findInitialModel } from "./model-resolver.ts";
 import { ModelRuntime } from "./model-runtime.ts";
 import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
+import { withContextWindow } from "./request-identity.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
@@ -266,7 +268,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
 	const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
-		const converted = convertToLlm(messages);
+		const converted = expandIncompatibleCompactions(convertToLlm(messages), agent.state.model);
 		// Check setting dynamically so mid-session changes take effect
 		if (!settingsManager.getBlockImages()) {
 			return converted;
@@ -321,8 +323,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const websocketConnectTimeoutMs =
 				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
 			const headerRunner = extensionRunnerRef.current;
+			// Derive the window from committed history so retries, resume, and tree navigation
+			// use the active branch's context without a separate persistent counter.
+			const requestIdentity = options?.requestIdentity
+				? withContextWindow(options.requestIdentity, sessionManager.getBranch())
+				: undefined;
 			return modelRuntime.streamSimple(model, context, {
 				...options,
+				requestIdentity,
 				timeoutMs,
 				websocketConnectTimeoutMs,
 				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,

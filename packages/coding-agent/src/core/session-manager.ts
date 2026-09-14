@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { type ImageContent, type Message, type TextContent, type Usage, uuidv7 } from "@earendil-works/pi-ai";
+import { getOpenAICompaction } from "@earendil-works/pi-ai/utils/openai-compaction";
 import { randomUUID } from "crypto";
 import {
 	appendFileSync,
@@ -22,6 +23,7 @@ import { normalizePath, resolvePath } from "../utils/paths.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
+	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
@@ -402,7 +404,9 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 		return [createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp)];
 	}
 	if (entry.type === "compaction") {
-		return [createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp)];
+		const message = createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp);
+		const native = getOpenAICompaction(entry.details);
+		return [native ? { ...message, openaiCompaction: native } : message];
 	}
 	return [];
 }
@@ -439,6 +443,8 @@ export function buildContextEntries(
 	}
 
 	const contextEntries: SessionEntry[] = [compaction];
+	// Native output already contains every retained item. Keeping the old tail duplicates it.
+	if (getOpenAICompaction(compaction.details)) return [...contextEntries, ...path.slice(compactionIdx + 1)];
 	let foundFirstKept = false;
 	for (let i = 0; i < compactionIdx; i++) {
 		const entry = path[i];
@@ -465,7 +471,17 @@ export function buildSessionContext(
 ): SessionContext {
 	const path = buildSessionPath(entries, leafId, byId);
 	const { thinkingLevel, model } = getSessionContextSettings(path);
-	const messages = buildContextEntries(entries, leafId, byId).flatMap(sessionEntryToContextMessages);
+	const messages = buildContextEntries(entries, leafId, byId).flatMap((entry) => {
+		const projected = sessionEntryToContextMessages(entry);
+		if (entry.type === "compaction" && projected[0]?.role === "compactionSummary" && projected[0].openaiCompaction) {
+			projected[0].fallbackMessages = convertToLlm(
+				buildSessionContext(entries, entry.parentId, byId).messages,
+			).flatMap((message) =>
+				message.role === "user" && message.openaiCompaction ? message.openaiCompaction.fallback : [message],
+			);
+		}
+		return projected;
+	});
 	return { messages, thinkingLevel, model };
 }
 

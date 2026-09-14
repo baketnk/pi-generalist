@@ -12,6 +12,7 @@ import type {
 	AgentMessage,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	NestedToolInvoker,
 	ThinkingLevel,
 	ToolExecutionMode,
 } from "@earendil-works/pi-agent-core";
@@ -307,6 +308,8 @@ export interface CompactOptions {
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
 export interface ExtensionContext {
+	/** Only present inside execute() of a tool opting into nestedTools. Invalid after that invocation settles. */
+	tools?: NestedToolInvoker;
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
 	/** Current run mode. Use "tui" to guard terminal-only UI such as custom components. */
@@ -477,6 +480,8 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	 * If omitted, the default execution mode applies.
 	 */
 	executionMode?: ToolExecutionMode;
+	/** Explicit allowlist for one level of brokered nested calls. Also serializes this tool against direct siblings. */
+	nestedTools?: readonly string[];
 
 	/** Execute the tool. */
 	execute(
@@ -690,6 +695,17 @@ export interface ContextEvent {
 	messages: AgentMessage[];
 }
 
+/** Read-only observation after all context handlers. Each observer receives its own copy.
+ * This is before provider conversion, image filtering, and provider-payload hooks;
+ * it is not proof of a sent request or of provider cache reuse. */
+export interface ContextSnapshotEvent {
+	type: "context_snapshot";
+	messages: AgentMessage[];
+	leafId: string | null;
+	contextErrors: number;
+	providerRequestHooks: boolean;
+}
+
 /** Fired before a provider request is sent. Can replace the payload. */
 export interface BeforeProviderRequestEvent {
 	type: "before_provider_request";
@@ -796,6 +812,7 @@ export interface MessageEndEvent {
 
 /** Fired when a tool starts executing */
 export interface ToolExecutionStartEvent {
+	parentToolCallId?: string;
 	type: "tool_execution_start";
 	toolCallId: string;
 	toolName: string;
@@ -804,6 +821,7 @@ export interface ToolExecutionStartEvent {
 
 /** Fired during tool execution with partial/streaming output */
 export interface ToolExecutionUpdateEvent {
+	parentToolCallId?: string;
 	type: "tool_execution_update";
 	toolCallId: string;
 	toolName: string;
@@ -813,6 +831,8 @@ export interface ToolExecutionUpdateEvent {
 
 /** Fired when a tool finishes executing */
 export interface ToolExecutionEndEvent {
+	parentToolCallId?: string;
+	effectiveArgs?: unknown;
 	type: "tool_execution_end";
 	toolCallId: string;
 	toolName: string;
@@ -887,6 +907,7 @@ export type InputEventResult =
 // ============================================================================
 
 interface ToolCallEventBase {
+	parentToolCallId?: string;
 	type: "tool_call";
 	toolCallId: string;
 }
@@ -954,6 +975,7 @@ export type ToolCallEvent =
 	| CustomToolCallEvent;
 
 interface ToolResultEventBase {
+	parentToolCallId?: string;
 	type: "tool_result";
 	toolCallId: string;
 	input: Record<string, unknown>;
@@ -1088,6 +1110,7 @@ export type ExtensionEvent =
 	| ResourcesDiscoverEvent
 	| SessionEvent
 	| ContextEvent
+	| ContextSnapshotEvent
 	| BeforeProviderRequestEvent
 	| BeforeProviderHeadersEvent
 	| AfterProviderResponseEvent
@@ -1273,6 +1296,7 @@ export interface ExtensionAPI {
 	on(event: "session_before_tree", handler: ExtensionHandler<SessionBeforeTreeEvent, SessionBeforeTreeResult>): void;
 	on(event: "session_tree", handler: ExtensionHandler<SessionTreeEvent>): void;
 	on(event: "context", handler: ExtensionHandler<ContextEvent, ContextEventResult>): void;
+	on(event: "context_snapshot", handler: ExtensionHandler<ContextSnapshotEvent>): void;
 	on(
 		event: "before_provider_request",
 		handler: ExtensionHandler<BeforeProviderRequestEvent, BeforeProviderRequestEventResult>,

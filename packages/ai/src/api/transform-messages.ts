@@ -8,6 +8,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import { expandIncompatibleCompactions } from "../utils/openai-compaction.ts";
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
@@ -67,6 +68,7 @@ export function transformMessages<TApi extends Api>(
 	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
 ): Message[] {
 	// Build a map of original tool call IDs to normalized IDs
+	messages = expandIncompatibleCompactions(messages, model);
 	const toolCallIdMap = new Map<string, string>();
 	// Normalize null/undefined content from untyped callers (custom tools, hand-built
 	// histories, old session files) so downstream code can rely on the type contract.

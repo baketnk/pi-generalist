@@ -44,6 +44,7 @@ export type {
 	CompactOptions,
 	// Events - Agent
 	ContextEvent,
+	ContextSnapshotEvent,
 	// Event Results
 	ContextEventResult,
 	ContextUsage,

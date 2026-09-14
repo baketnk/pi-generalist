@@ -15,13 +15,22 @@ import type { RegisteredTool } from "./types.ts";
  * Uses the runner's createContext() for consistent context across tools and event handlers.
  */
 export function wrapRegisteredTool(registeredTool: RegisteredTool, runner: ExtensionRunner): AgentTool {
-	const tool = wrapToolDefinition(registeredTool.definition, () => runner.createContext());
+	const tool = wrapToolDefinition(registeredTool.definition, (signal) => runner.createContext(signal));
 	const execute = tool.execute;
 	return {
 		...tool,
-		execute: async (toolCallId, params, signal, onUpdate) => {
+		execute: async (toolCallId, params, signal, onUpdate, execution) => {
 			const activeBefore = runner.getActiveTools();
-			const result = await execute(toolCallId, params, signal, onUpdate);
+			const invoker = execution?.tools;
+			const guardedExecution = invoker && {
+				tools: {
+					invoke: (name: string, args: Record<string, unknown>, options?: { signal?: AbortSignal }) => {
+						runner.getActiveTools(); // Throws for an invalidated extension runtime.
+						return invoker.invoke(name, args, options);
+					},
+				},
+			};
+			const result = await execute(toolCallId, params, signal, onUpdate, guardedExecution);
 			const activeAfter = runner.getActiveTools();
 			if (!activeBefore.every((name) => activeAfter.includes(name))) return result;
 
