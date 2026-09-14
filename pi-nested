@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Reuse the normal Pi profile so its authentication, packages, and settings apply.
+# Set PI_CODING_AGENT_DIR explicitly to use an isolated or alternate profile.
+export PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+export PI_SKIP_VERSION_CHECK=1
+exec "$ROOT/node_modules/.bin/tsx" --tsconfig "$ROOT/tsconfig.json" \
+  "$ROOT/packages/coding-agent/src/cli.ts" \
+  --extension "$ROOT/packages/coding-agent/examples/extensions/code-mode/index.ts" "$@"

@@ -40,6 +40,7 @@ import type {
 	CompactOptions,
 	ContextEvent,
 	ContextEventResult,
+	ContextSnapshotEvent,
 	ContextUsage,
 	ContextWithSystemEvent,
 	EntryRenderer,
@@ -188,6 +189,7 @@ type RunnerEmitEvent = Exclude<
 	| UserBashEvent
 	| ContextEvent
 	| ContextWithSystemEvent
+	| ContextSnapshotEvent
 	| CacheWarmingDecisionEvent
 	| BeforeProviderRequestEvent
 	| BeforeProviderHeadersEvent
@@ -881,7 +883,7 @@ export class ExtensionRunner {
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
 	 */
-	createContext(): ExtensionContext {
+	createContext(signalOverride?: AbortSignal): ExtensionContext {
 		const runner = this;
 		const getModel = this.getModel;
 		const getScopedModels = this.getScopedModels;
@@ -932,7 +934,7 @@ export class ExtensionRunner {
 			},
 			get signal() {
 				runner.assertActive();
-				return runner.getSignalFn();
+				return signalOverride ?? runner.getSignalFn();
 			},
 			abort: () => {
 				runner.assertActive();
@@ -1187,8 +1189,8 @@ export class ExtensionRunner {
 		return modified ? currentMessage : undefined;
 	}
 
-	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
-		const ctx = this.createContext();
+	async emitToolResult(event: ToolResultEvent, signal?: AbortSignal): Promise<ToolResultEventResult | undefined> {
+		const ctx = this.createContext(signal);
 		const currentEvent: ToolResultEvent = { ...event };
 		let modified = false;
 
@@ -1246,8 +1248,8 @@ export class ExtensionRunner {
 		};
 	}
 
-	async emitToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined> {
-		const ctx = this.createContext();
+	async emitToolCall(event: ToolCallEvent, signal?: AbortSignal): Promise<ToolCallEventResult | undefined> {
+		const ctx = this.createContext(signal);
 		let result: ToolCallEventResult | undefined;
 
 		for (const { handlers } of snapshotEventHandlers(this.extensions, "tool_call")) {
@@ -1305,6 +1307,7 @@ export class ExtensionRunner {
 	async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
 		const ctx = this.createContext();
 		let currentMessages = structuredClone(messages);
+		let contextErrors = 0;
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "context")) {
 			for (const handler of handlers) {
@@ -1323,6 +1326,7 @@ export class ExtensionRunner {
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
+					contextErrors++;
 					this.emitError({
 						extensionPath: ext.path,
 						event: "context",
@@ -1352,11 +1356,37 @@ export class ExtensionRunner {
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
+					contextErrors++;
 					this.emitError({
 						extensionPath: ext.path,
 						event: "context_with_system",
 						error: message,
 						stack,
+					});
+				}
+			}
+		}
+
+		// Notify only after every transformer, independent of extension load order.
+		// Do not share copies across observers or apply observer return values.
+		const leafId = this.sessionManager.getLeafId();
+		const providerRequestHooks = this.hasHandlers("before_provider_request");
+		for (const ext of this.extensions) {
+			for (const handler of ext.handlers.get("context_snapshot") ?? []) {
+				try {
+					const event: ContextSnapshotEvent = {
+						type: "context_snapshot",
+						messages: structuredClone(currentMessages),
+						leafId,
+						contextErrors,
+						providerRequestHooks,
+					};
+					await handler(event, ctx);
+				} catch (error) {
+					this.emitError({
+						extensionPath: ext.path,
+						event: "context_snapshot",
+						error: error instanceof Error ? error.message : String(error),
 					});
 				}
 			}

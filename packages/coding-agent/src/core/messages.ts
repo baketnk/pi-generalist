@@ -6,7 +6,7 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
+import type { ImageContent, Message, OpenAICompaction, TextContent, UncompactedMessage } from "@earendil-works/pi-ai";
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
 
@@ -60,6 +60,9 @@ export interface BranchSummaryMessage {
 }
 
 export interface CompactionSummaryMessage {
+	openaiCompaction?: OpenAICompaction;
+	/** Runtime-only transparent history, reconstructed from the pre-checkpoint journal. */
+	fallbackMessages?: UncompactedMessage[];
 	role: "compactionSummary";
 	summary: string;
 	tokensBefore: number;
@@ -174,6 +177,14 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						timestamp: m.timestamp,
 					};
 				case "compactionSummary":
+					if (m.openaiCompaction) {
+						return {
+							role: "user",
+							content: [],
+							timestamp: m.timestamp,
+							openaiCompaction: { ...m.openaiCompaction, fallback: m.fallbackMessages ?? [] },
+						};
+					}
 					return {
 						role: "user",
 						content: [

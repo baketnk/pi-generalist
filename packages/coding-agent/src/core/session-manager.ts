@@ -7,10 +7,12 @@ import {
 	type SystemMessage,
 	type TextContent,
 	type ToolResultMessage,
+	type UncompactedMessage,
 	type Usage,
 	type UserMessage,
 	uuidv7,
 } from "@earendil-works/pi-ai";
+import { getOpenAICompaction } from "@earendil-works/pi-ai/utils/openai-compaction";
 import { randomUUID } from "crypto";
 import {
 	appendFileSync,
@@ -34,6 +36,7 @@ import { normalizePath, resolvePath } from "../utils/paths.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
+	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
@@ -460,7 +463,9 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	}
 	if (entry.type === "compaction") {
 		const summary = createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp);
-		return entry.systemMessage ? [entry.systemMessage, summary] : [summary];
+		const native = getOpenAICompaction(entry.details);
+		const projectedSummary = native ? { ...summary, openaiCompaction: native } : summary;
+		return entry.systemMessage ? [entry.systemMessage, projectedSummary] : [projectedSummary];
 	}
 	return [];
 }
@@ -497,6 +502,8 @@ export function buildContextEntries(
 	}
 
 	const contextEntries: SessionEntry[] = [compaction];
+	// Native output already contains every retained item. Keeping the old tail duplicates it.
+	if (getOpenAICompaction(compaction.details)) return [...contextEntries, ...path.slice(compactionIdx + 1)];
 	let foundFirstKept = false;
 	for (let i = 0; i < compactionIdx; i++) {
 		const entry = path[i];
@@ -552,18 +559,32 @@ export function buildSessionProjection(
 	for (const entry of contextEntries) {
 		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
 	}
-	const projectedEntries = contextEntries.map(
-		(sourceEntry, index): ProjectedSessionEntry => ({
-			sourceEntry,
-			// buildContextEntries() may retain an older compaction entry because its
-			// raw ID lies inside the newest retained range. Only the newest compaction
-			// at index zero contributes a checkpoint and summary.
-			messages:
-				sourceEntry.type === "compaction" && index > 0
-					? []
-					: projectContextEntry(sourceEntry, edits.get(sourceEntry.id)),
-		}),
-	);
+	const projectedEntries = contextEntries.map((sourceEntry, index): ProjectedSessionEntry => {
+		// buildContextEntries() may retain an older compaction entry because its
+		// raw ID lies inside the newest retained range. Only the newest compaction
+		// at index zero contributes a checkpoint and summary.
+		let messages =
+			sourceEntry.type === "compaction" && index > 0
+				? []
+				: projectContextEntry(sourceEntry, edits.get(sourceEntry.id));
+		const nativeSummary = messages.find(
+			(message) => message.role === "compactionSummary" && message.openaiCompaction !== undefined,
+		);
+		if (nativeSummary?.role === "compactionSummary" && sourceEntry.type === "compaction") {
+			const fallback = convertToLlm(buildSessionProjection(entries, sourceEntry.parentId, byId).messages).flatMap(
+				(message): UncompactedMessage[] => {
+					if (message.role === "system") return [];
+					return message.role === "user" && message.openaiCompaction
+						? message.openaiCompaction.fallback
+						: [message];
+				},
+			);
+			messages = messages.map((message) =>
+				message === nativeSummary ? { ...nativeSummary, fallbackMessages: fallback } : message,
+			);
+		}
+		return { sourceEntry, messages };
+	});
 	return {
 		entries: projectedEntries,
 		messages: projectedEntries.flatMap((entry) => entry.messages),

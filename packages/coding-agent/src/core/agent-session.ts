@@ -32,6 +32,8 @@ import {
 	type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 import { contentText, getCurrentSystemMessage, getCurrentTools, retryDelayMs } from "@earendil-works/pi-ai";
+import { compactOpenAI, supportsNativeOpenAICompaction } from "@earendil-works/pi-ai/api/openai-compaction";
+
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -74,9 +76,9 @@ import {
 	estimateProjectedContextTokens,
 	estimateTokens,
 	generateBranchSummary,
-	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
+import { prepareProviderCompaction } from "./compaction/openai-native.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -118,7 +120,11 @@ import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./m
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { NestedToolCallRunner } from "./nested-tool-calls.ts";
+
+import { NESTED_TOOL_RECORD, nestedToolRecord } from "./nested-tool-record.ts";
+
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
+import { withContextWindow } from "./request-identity.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { exportSessionToJsonl } from "./session-export.ts";
 import {
@@ -650,28 +656,39 @@ export class AgentSession {
 	 * happens here instead of in wrappers.
 	 */
 	private _installAgentToolHooks(): void {
-		this.agent.beforeToolCall = (context) => this._beforeToolCall(context);
-		this.agent.afterToolCall = (context) => this._afterToolCall(context);
+		this.agent.beforeToolCall = (context, signal) => this._beforeToolCall(context, undefined, signal);
+		this.agent.afterToolCall = (context, signal) => this._afterToolCall(context, undefined, signal);
 	}
 
 	/** `tool_call` handlers. `parentToolCallId` is set for calls another tool made. */
 	private async _beforeToolCall(
 		{ toolCall, args }: BeforeToolCallContext,
-		parentToolCallId?: string,
+		parentToolCallId = toolCall.parentToolCallId,
+		signal?: AbortSignal,
 	): Promise<BeforeToolCallResult | undefined> {
 		const runner = this._extensionRunner;
+		if (toolCall.parentToolCallId && !this.getActiveToolNames().includes(toolCall.name)) {
+			return { block: true, reason: `Tool ${toolCall.name} is inactive` };
+		}
 		if (!runner.hasHandlers("tool_call")) {
 			return undefined;
 		}
 
 		try {
-			return await runner.emitToolCall({
-				type: "tool_call",
-				toolName: toolCall.name,
-				toolCallId: toolCall.id,
-				...(parentToolCallId ? { parentToolCallId } : {}),
-				input: args as Record<string, unknown>,
-			});
+			const result = await runner.emitToolCall(
+				{
+					type: "tool_call",
+					toolName: toolCall.name,
+					toolCallId: toolCall.id,
+					...(parentToolCallId ? { parentToolCallId } : {}),
+					input: args as Record<string, unknown>,
+				},
+				signal,
+			);
+			if (toolCall.parentToolCallId && !this.getActiveToolNames().includes(toolCall.name)) {
+				return { block: true, reason: `Tool ${toolCall.name} became inactive` };
+			}
+			return result;
 		} catch (err) {
 			if (err instanceof Error) {
 				throw err;
@@ -683,22 +700,26 @@ export class AgentSession {
 	/** `tool_result` handlers and image normalization. `parentToolCallId` is set for calls another tool made. */
 	private async _afterToolCall(
 		{ toolCall, args, result, isError }: AfterToolCallContext,
-		parentToolCallId?: string,
+		parentToolCallId = toolCall.parentToolCallId,
+		signal?: AbortSignal,
 	): Promise<AfterToolCallResult | undefined> {
 		const runner = this._extensionRunner;
 		const hookResult = runner.hasHandlers("tool_result")
-			? await runner.emitToolResult({
-					type: "tool_result",
-					toolName: toolCall.name,
-					toolCallId: toolCall.id,
-					...(parentToolCallId ? { parentToolCallId } : {}),
-					input: args as Record<string, unknown>,
-					content: result.content,
-					details: result.details,
-					...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
-					isError,
-					usage: result.usage,
-				})
+			? await runner.emitToolResult(
+					{
+						type: "tool_result",
+						toolName: toolCall.name,
+						toolCallId: toolCall.id,
+						...(parentToolCallId ? { parentToolCallId } : {}),
+						input: args as Record<string, unknown>,
+						content: result.content,
+						details: result.details,
+						...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
+						isError,
+						usage: result.usage,
+					},
+					signal,
+				)
 			: undefined;
 
 		const content = hookResult?.content ?? result.content ?? [];
@@ -749,8 +770,8 @@ export class AgentSession {
 					tools: this._getCallableTools(),
 					assistantMessage,
 					context: { messages: this.agent.state.messages, tools: this.agent.state.tools },
-					beforeToolCall: (context) => this._beforeToolCall(context, parentId),
-					afterToolCall: (context) => this._afterToolCall(context, parentId),
+					beforeToolCall: (context, signal) => this._beforeToolCall(context, parentId, signal),
+					afterToolCall: (context, signal) => this._afterToolCall(context, parentId, signal),
 					signal,
 					onUpdate,
 				});
@@ -1117,6 +1138,10 @@ export class AgentSession {
 				this._nestedToolCalls.clear();
 			}
 		}
+
+		const nestedRecord = nestedToolRecord(event);
+		if (nestedRecord) this.sessionManager.appendCustomEntry(NESTED_TOOL_RECORD, nestedRecord);
+
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
@@ -1352,6 +1377,7 @@ export class AgentSession {
 			}
 		} else if (event.type === "tool_execution_start") {
 			const extensionEvent: ToolExecutionStartEvent = {
+				...(event.parentToolCallId ? { parentToolCallId: event.parentToolCallId } : {}),
 				type: "tool_execution_start",
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
@@ -1360,6 +1386,7 @@ export class AgentSession {
 			await this._extensionRunner.emit(extensionEvent);
 		} else if (event.type === "tool_execution_update") {
 			const extensionEvent: ToolExecutionUpdateEvent = {
+				...(event.parentToolCallId ? { parentToolCallId: event.parentToolCallId } : {}),
 				type: "tool_execution_update",
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
@@ -1369,6 +1396,9 @@ export class AgentSession {
 			await this._extensionRunner.emit(extensionEvent);
 		} else if (event.type === "tool_execution_end") {
 			const extensionEvent: ToolExecutionEndEvent = {
+				...(event.parentToolCallId
+					? { parentToolCallId: event.parentToolCallId, effectiveArgs: event.effectiveArgs }
+					: {}),
 				type: "tool_execution_end",
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
@@ -2789,6 +2819,55 @@ export class AgentSession {
 	): Promise<CompactionResult> {
 		// Resolve the request only when Pi summarizes itself: routing may call models or fail.
 		const request = await this._getSummarizationRequestAuth(model, signal);
+		if (supportsNativeOpenAICompaction(request.model, request.env)) {
+			const sessionId = this.sessionManager.getSessionId();
+			const leafId = this.sessionManager.getLeafId();
+			const activeModel = this.model;
+			// Never fold revocable context-hook snapshots into opaque state. They are
+			// projected separately after this explicit compaction/cache-reset boundary.
+			const messages = await this.agent.convertMessagesToLlm();
+			const context = {
+				messages: customInstructions
+					? [
+							...messages,
+							{
+								role: "system" as const,
+								content: `Compaction focus: ${customInstructions}`,
+								timestamp: Date.now(),
+							},
+						]
+					: messages,
+			};
+			const result = await compactOpenAI(request.model, context, {
+				apiKey: request.apiKey,
+				headers: request.headers,
+				env: request.env,
+				signal,
+				sessionId,
+				requestIdentity: withContextWindow(
+					this.agent.createRequestIdentity("compaction"),
+					this.sessionManager.getBranch(),
+				),
+				reasoning: this.thinkingLevel === "off" ? undefined : this.thinkingLevel,
+				onPayload: this.agent.onPayload,
+				onResponse: this.agent.onResponse,
+			});
+			signal.throwIfAborted();
+			if (
+				this.sessionManager.getSessionId() !== sessionId ||
+				this.sessionManager.getLeafId() !== leafId ||
+				this.model !== activeModel
+			) {
+				throw new Error("Session or model changed during native compaction; result was not committed");
+			}
+			return {
+				summary: `OpenAI native compaction (${result.compaction.output.length} returned items; opaque provider state).`,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				usage: result.usage,
+				details: { openaiCompaction: result.compaction },
+			};
+		}
 		return compact(
 			preparation,
 			request.model,
@@ -2840,8 +2919,7 @@ export class AgentSession {
 
 			const settings = this.settingsManager.getCompactionSettings(model);
 			const pathEntries = this.sessionManager.getBranch();
-
-			const preparation = prepareCompaction(pathEntries, settings);
+			const preparation = prepareProviderCompaction(pathEntries, settings, model);
 			if (!preparation) {
 				// Check why we can't compact
 				const lastEntry = pathEntries[pathEntries.length - 1];
@@ -2908,15 +2986,19 @@ export class AgentSession {
 				throw new Error("Compaction cancelled");
 			}
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
-			const newEntries = this.sessionManager.getEntries();
+			const compactionId = this.sessionManager.appendCompaction(
+				summary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				fromExtension,
+				usage,
+			);
 			this._refreshFinalizedContext();
 			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
 
 			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
+			const savedCompactionEntry = this.sessionManager.getEntry(compactionId) as CompactionEntry | undefined;
 
 			if (this._extensionRunner && savedCompactionEntry) {
 				await this._extensionRunner.emit({
@@ -3167,14 +3249,15 @@ export class AgentSession {
 				return false;
 			}
 
+			abortController = new AbortController();
+			this._autoCompactionAbortController = abortController;
+
 			const pathEntries = this.sessionManager.getBranch();
-			const preparation = prepareCompaction(pathEntries, settings);
+			const preparation = prepareProviderCompaction(pathEntries, settings, model);
 			if (!preparation) {
 				return false;
 			}
 
-			abortController = new AbortController();
-			this._autoCompactionAbortController = abortController;
 			started = true;
 			this._emit({ type: "compaction_start", reason });
 			abortController.signal.throwIfAborted();
@@ -3234,15 +3317,19 @@ export class AgentSession {
 			}
 			abortController.signal.throwIfAborted();
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
-			const newEntries = this.sessionManager.getEntries();
+			const compactionId = this.sessionManager.appendCompaction(
+				summary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				fromExtension,
+				usage,
+			);
 			this._refreshFinalizedContext();
 			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
 
 			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
+			const savedCompactionEntry = this.sessionManager.getEntry(compactionId) as CompactionEntry | undefined;
 
 			if (this._extensionRunner && savedCompactionEntry) {
 				await this._extensionRunner.emit({
@@ -3718,6 +3805,7 @@ export class AgentSession {
 	}
 
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
+		await this.abort(); // Settle owned nested calls before invalidating their runner.
 		const oldRunner = this._extensionRunner;
 		const previousFlagValues = oldRunner.getFlagValues();
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });

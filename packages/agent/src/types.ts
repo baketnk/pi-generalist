@@ -1,9 +1,11 @@
 import type {
+	AgentRequestIdentity,
 	Api,
 	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	ImageContent,
+	JsonObject,
 	JsonValue,
 	Message,
 	Model,
@@ -55,7 +57,19 @@ export type ToolExecutionMode = "sequential" | "parallel";
 export type QueueMode = "all" | "one-at-a-time";
 
 /** A single tool call content block emitted by an assistant message. */
-export type AgentToolCall = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
+export type AgentToolCall = Extract<AssistantMessage["content"][number], { type: "toolCall" }> & {
+	/** Present only for brokered nested calls, never a model-issued tool call. */
+	parentToolCallId?: string;
+};
+
+/** Available only during an opted-in tool's execute invocation. Not ambient agent authority. */
+export interface ToolExecutionContext {
+	nestedTools?: NestedToolInvoker;
+}
+
+export interface NestedToolInvoker {
+	invoke(name: string, args: JsonObject, options?: { signal?: AbortSignal }): Promise<ToolResultMessage>;
+}
 
 /**
  * Result returned from `beforeToolCall`.
@@ -192,6 +206,8 @@ export interface PrepareNextTurnContext extends AgentTurnContext {}
 
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
+	/** Creates a new logical identity when the loop consumes independent follow-up work. */
+	createRequestIdentity?: () => AgentRequestIdentity;
 
 	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
@@ -471,6 +487,8 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * Must return an object that matches `TParameters`.
 	 */
 	prepareArguments?: (args: unknown) => Static<TParameters>;
+	/** Opt into one level of nested calls to these tools. Orchestrators run sequentially against sibling calls. */
+	nestedTools?: readonly string[];
 	/**
 	 * JSON Schema of `structuredContent` in successful results. Tools that declare it should always
 	 * set `structuredContent`.
@@ -485,6 +503,7 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 		params: Static<TParameters>,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TDetails>,
+		execution?: ToolExecutionContext,
 	) => Promise<AgentToolResult<TDetails>>;
 	/** Recovery policy for an effect whose durable intent exists but whose outcome is unknown. */
 	replay?: "never" | "safe";
@@ -526,8 +545,15 @@ export type AgentEvent =
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
 	// Tool execution lifecycle
-	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
-	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
+	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any; parentToolCallId?: string }
+	| {
+			type: "tool_execution_update";
+			toolCallId: string;
+			toolName: string;
+			args: any;
+			partialResult: any;
+			parentToolCallId?: string;
+	  }
 	| {
 			type: "tool_execution_end";
 			toolCallId: string;
@@ -536,4 +562,6 @@ export type AgentEvent =
 			isError: boolean;
 			/** Milliseconds `execute()` took, measured with a monotonic clock; absent when the tool did not run. */
 			durationMs?: number;
+			parentToolCallId?: string;
+			effectiveArgs?: unknown;
 	  };

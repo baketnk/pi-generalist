@@ -24,6 +24,7 @@ import type {
 	Usage,
 } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
+import { getOpenAICompaction } from "@earendil-works/pi-ai/utils/openai-compaction";
 import { convertToLlm } from "../messages.ts";
 import {
 	buildSessionProjection,
@@ -297,6 +298,11 @@ function estimateTextAndImageContentChars(content: string | Array<{ type: string
  */
 export function estimateTokens(message: AgentMessage): number {
 	let chars = 0;
+	if (message.role === "compactionSummary" && message.openaiCompaction) {
+		return (
+			message.openaiCompaction.outputTokens ?? Math.ceil(JSON.stringify(message.openaiCompaction.output).length / 4)
+		);
+	}
 
 	switch (message.role) {
 		case "system": {
@@ -860,6 +866,20 @@ export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
 ): CompactionPreparation | undefined {
+	// Text compaction after a provider change must summarize the recoverable journal,
+	// not the native checkpoint's UI label. Preserve IDs/parent links for cut points.
+	pathEntries = pathEntries.map(
+		(entry): SessionEntry =>
+			entry.type === "compaction" && getOpenAICompaction(entry.details)
+				? {
+						type: "custom",
+						customType: "pi:native-compaction-history-boundary",
+						id: entry.id,
+						parentId: entry.parentId,
+						timestamp: entry.timestamp,
+					}
+				: entry,
+	);
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
 	}

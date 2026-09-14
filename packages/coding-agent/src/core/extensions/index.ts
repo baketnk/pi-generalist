@@ -58,6 +58,7 @@ export type {
 	ContextEvent,
 	// Event Results
 	ContextEventResult,
+	ContextSnapshotEvent,
 	ContextUsage,
 	ContextWithSystemEvent,
 	CustomEntryDraft,

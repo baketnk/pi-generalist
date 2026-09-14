@@ -14,6 +14,15 @@
 
 ## Code Quality
 
+- **DO. NOT. BREAK. CACHE PREFIXING.** Stable instructions, tools, and committed
+  context snapshots are a contract, not a suggestion. Do not move or replace an
+  unchanged prefix on ordinary turns, tool continuations, retries, or reloads.
+  Native compaction is an explicit reset boundary: replay its ENTIRE returned
+  window unchanged, not just the encrypted item. Do not bake revocable extension
+  snapshots into opaque state. Test serialized provider payloads before touching
+  this code; changing attribution metadata is not permission to discard a valid
+  cached input delta.
+
 - Read files in full before wide-ranging changes, before editing files you have not fully inspected, and when asked to investigate or audit. Do not rely on search snippets for broad changes.
 - No `any` unless absolutely necessary.
 - Inline single-line helpers that have only one call site.

@@ -18,14 +18,13 @@ export function wrapToolDefinition<TDetails = unknown>(
 		constrainedSampling: definition.constrainedSampling,
 		prepareArguments: definition.prepareArguments,
 		executionMode: definition.executionMode,
-		execute: (toolCallId, params, signal, onUpdate, ctx?: ExtensionToolContext) =>
-			definition.execute(
-				toolCallId,
-				params,
-				signal,
-				onUpdate,
-				ctx ?? (ctxFactory?.(toolCallId, signal) as ExtensionToolContext),
-			),
+		nestedTools: definition.nestedTools,
+		execute: (toolCallId, params, signal, onUpdate, execution) => {
+			const ctx =
+				execution && "cwd" in execution ? (execution as ExtensionToolContext) : ctxFactory?.(toolCallId, signal);
+			if (ctx && execution?.nestedTools) ctx.nestedTools = execution.nestedTools;
+			return definition.execute(toolCallId, params, signal, onUpdate, ctx as ExtensionToolContext);
+		},
 	};
 }
 
@@ -53,6 +52,8 @@ export function createToolDefinitionFromAgentTool(tool: AgentTool<any>): ToolDef
 		constrainedSampling: tool.constrainedSampling,
 		prepareArguments: tool.prepareArguments,
 		executionMode: tool.executionMode,
-		execute: async (toolCallId, params, signal, onUpdate) => tool.execute(toolCallId, params, signal, onUpdate),
+		nestedTools: tool.nestedTools,
+		execute: async (toolCallId, params, signal, onUpdate, ctx) =>
+			tool.execute(toolCallId, params, signal, onUpdate, ctx),
 	};
 }

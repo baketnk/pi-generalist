@@ -14,6 +14,7 @@ import type {
 	AgentToolCallOutcome,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	NestedToolInvoker,
 	ThinkingLevel,
 	ToolExecutionMode,
 } from "@earendil-works/pi-agent-core";
@@ -329,6 +330,8 @@ export interface CompactOptions {
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
 export interface ExtensionContext {
+	/** Only present inside execute() of a tool opting into nestedTools. Invalid after that invocation settles. */
+	nestedTools?: NestedToolInvoker;
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
 	/** Current run mode. Use "tui" to guard terminal-only UI such as custom components. */
@@ -651,6 +654,8 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	 * If omitted, the default execution mode applies.
 	 */
 	executionMode?: ToolExecutionMode;
+	/** Explicit allowlist for one level of brokered nested calls. Also serializes this tool against direct siblings. */
+	nestedTools?: readonly string[];
 
 	/** Execute the tool. */
 	execute(
@@ -903,6 +908,17 @@ export interface ContextWithSystemEvent {
 	messages: AgentMessage[];
 }
 
+/** Read-only observation after all context handlers. Each observer receives its own copy.
+ * This is before provider conversion, image filtering, and provider-payload hooks;
+ * it is not proof of a sent request or of provider cache reuse. */
+export interface ContextSnapshotEvent {
+	type: "context_snapshot";
+	messages: AgentMessage[];
+	leafId: string | null;
+	contextErrors: number;
+	providerRequestHooks: boolean;
+}
+
 /** Fired before a provider request is sent. Can replace the payload. */
 export interface BeforeProviderRequestEvent {
 	type: "before_provider_request";
@@ -1119,6 +1135,7 @@ export interface ToolExecutionUpdateEvent {
 
 /** Fired when a tool finishes executing */
 export interface ToolExecutionEndEvent {
+	effectiveArgs?: unknown;
 	type: "tool_execution_end";
 	toolCallId: string;
 	toolName: string;
@@ -1415,6 +1432,7 @@ export type ExtensionEvent =
 	| SessionEvent
 	| ContextEvent
 	| ContextWithSystemEvent
+	| ContextSnapshotEvent
 	| CacheWarmingDecisionEvent
 	| BeforeProviderRequestEvent
 	| BeforeProviderHeadersEvent
@@ -1634,6 +1652,7 @@ export interface ExtensionAPI {
 	on(event: "session_tree", handler: ExtensionHandler<SessionTreeEvent>): () => void;
 	on(event: "context", handler: ExtensionHandler<ContextEvent, ContextEventResult>): () => void;
 	on(event: "context_with_system", handler: ExtensionHandler<ContextWithSystemEvent, ContextEventResult>): () => void;
+	on(event: "context_snapshot", handler: ExtensionHandler<ContextSnapshotEvent>): () => void;
 	on(
 		event: "cache_warming_decision",
 		handler: ExtensionHandler<CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult>,
