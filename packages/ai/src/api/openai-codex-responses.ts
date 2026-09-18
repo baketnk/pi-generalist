@@ -13,6 +13,7 @@ import type {
 	Api,
 	AssistantMessage,
 	Context,
+	JsonValue,
 	Model,
 	ProviderEnv,
 	ProviderHeaders,
@@ -36,6 +37,7 @@ import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { uuidv7 } from "../utils/uuid.ts";
 import { buildCodexRequestMetadata } from "./codex-request-metadata.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
+import { collectCodexCompaction } from "./openai-codex-compaction.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
@@ -699,7 +701,7 @@ function getServiceTierCostMultiplier(
 	}
 }
 
-/** Codex's native route accepts the same model-visible tools and instructions as generation. */
+/** Remote compaction v2 uses the ordinary Responses stream with a final trigger item. */
 export async function buildCompactionRequest(
 	model: Model<"openai-codex-responses">,
 	context: Context,
@@ -710,42 +712,40 @@ export async function buildCompactionRequest(
 	const url = resolveCodexUrl(model.baseUrl);
 	const turnState = getCodexTurnState(options.requestIdentity, accountId, url);
 	const clamped = options.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
-	const full = buildRequestBody(
+	const cacheSessionId = options.cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options.sessionId);
+	let body = buildRequestBody(
 		model,
 		context,
 		{ ...options, reasoningEffort: clamped === "off" ? undefined : clamped },
-		options.cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options.sessionId),
+		cacheSessionId,
 	);
-	const { input, instructions, tools, parallel_tool_calls, reasoning, text, prompt_cache_key } = full;
-	let body = {
-		model: model.id,
-		input,
-		instructions,
-		tools,
-		parallel_tool_calls,
-		reasoning,
-		text,
-		prompt_cache_key,
-	} as RequestBody;
 	const replaced = await options.onPayload?.(body, model);
 	if (replaced !== undefined) body = replaced as RequestBody;
-	// Codex's CompactionInput does not include client_metadata. Canonical identity
-	// goes in the compatibility headers here, unlike generation's response.create.
-	const headers = buildBaseCodexHeaders(
+	const metadata = buildCodexRequestMetadata(options.requestIdentity);
+	if (metadata) body.client_metadata = metadata.clientMetadata;
+	// Snapshot the actual wire input after payload hooks. The request-only trigger
+	// never enters the journal or the next context window.
+	const input = JSON.parse(JSON.stringify(body.input ?? [])) as JsonValue[];
+	body = { ...body, store: false, stream: true, input: [...(body.input ?? []), { type: "compaction_trigger" }] };
+	delete body.previous_response_id;
+	const headers = buildSSEHeaders(
 		model.headers,
 		options.headers,
 		accountId,
 		options.apiKey,
+		cacheSessionId,
 		options.requestIdentity,
 	);
 	applyCodexTurnState(headers, turnState, model.headers, options.headers);
-	headers.set("content-type", "application/json");
-	headers.set("accept", "application/json");
 	return {
-		url: `${url}/compact`,
+		url,
 		headers,
 		body,
 		onResponse: (response: Response) => captureCodexTurnState(turnState, response.headers.get(TURN_STATE_HEADER)),
+		readResponse: (response: Response, signal?: AbortSignal) =>
+			collectCodexCompaction(parseSSE(response, signal), input, (metadataHeaders) =>
+				captureCodexTurnState(turnState, metadataHeaders[TURN_STATE_HEADER]),
+			),
 	};
 }
 
@@ -945,6 +945,7 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 				throw new Error("Request was aborted");
 			}
 			buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+			buffer = buffer.replace(/\r\n/g, "\n");
 			// Treat EOF as terminating the residual SSE frame.
 			if (done && buffer.trim()) buffer += "\n\n";
 
@@ -1790,6 +1791,11 @@ function buildBaseCodexHeaders(
 	headers.set("Authorization", `Bearer ${token}`);
 	headers.set("chatgpt-account-id", accountId);
 	headers.set("User-Agent", getPiUserAgent());
+	const features = (headers.get("x-codex-beta-features") ?? "")
+		.split(",")
+		.map((value) => value.trim())
+		.filter(Boolean);
+	headers.set("x-codex-beta-features", [...new Set([...features, "remote_compaction_v2"])].join(","));
 	return headers;
 }
 
