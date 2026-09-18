@@ -54,7 +54,7 @@ afterEach(() => {
 
 describe("native OpenAI compaction", () => {
 	it.each(["openai-responses", "openai-codex-responses"] as const)(
-		"uses %s's compact schema and replays the entire returned window",
+		"uses %s's native protocol and replays the entire checkpoint window",
 		async (api) => {
 			const requests: { url: string; body: Record<string, unknown>; headers: Headers }[] = [];
 			const fetch: typeof globalThis.fetch = async (url, init) => {
@@ -62,8 +62,25 @@ describe("native OpenAI compaction", () => {
 					typeof init?.body === "string"
 						? init.body
 						: Buffer.from(zstdDecompressSync(init?.body as Uint8Array)).toString();
-				requests.push({ url: String(url), body: JSON.parse(body), headers: new Headers(init?.headers) });
+				const payload = JSON.parse(body);
+				requests.push({ url: String(url), body: payload, headers: new Headers(init?.headers) });
 				if (String(url).endsWith("/compact")) return response();
+				if (payload.input.at(-1)?.type === "compaction_trigger") {
+					return new Response(
+						[
+							{ type: "response.output_item.done", item: output[1] },
+							{
+								type: "response.completed",
+								response: {
+									status: "completed",
+									usage: { input_tokens: 100, output_tokens: 12, input_tokens_details: { cached_tokens: 90 } },
+								},
+							},
+						]
+							.map((event) => `data: ${JSON.stringify(event)}\n\n`)
+							.join(""),
+					);
+				}
 				return new Response(
 					'data: {"type":"response.completed","response":{"id":"r","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}\n\n',
 					{ headers: { "content-type": "text/event-stream" } },
@@ -76,17 +93,30 @@ describe("native OpenAI compaction", () => {
 				sessionId: "session",
 				requestIdentity: identity,
 			});
-			expect(result.compaction.output).toEqual(output);
+			const expectedOutput =
+				api === "openai-responses"
+					? output
+					: [
+							{ type: "message", role: "user", content: [{ type: "input_text", text: "original question" }] },
+							output[1],
+						];
+			expect(result.compaction.output).toEqual(expectedOutput);
 			expect(result.usage).toMatchObject({ input: 10, cacheRead: 90, output: 12, totalTokens: 112 });
 			expect(requests[0].url).toBe(
 				api === "openai-responses"
 					? "https://api.openai.com/v1/responses/compact"
-					: "https://chatgpt.com/backend-api/codex/responses/compact",
+					: "https://chatgpt.com/backend-api/codex/responses",
 			);
 			expect(requests[0].body).toMatchObject({ model: m.id, instructions: context.systemPrompt });
-			for (const key of ["stream", "store", "previous_response_id", "max_output_tokens", "client_metadata"])
-				expect(requests[0].body[key]).toBeUndefined();
+			for (const key of ["previous_response_id", "max_output_tokens"]) expect(requests[0].body[key]).toBeUndefined();
 			if (api === "openai-codex-responses") {
+				expect(requests[0].body).toMatchObject({
+					stream: true,
+					store: false,
+					client_metadata: { turn_id: "compact-turn" },
+				});
+				expect((requests[0].body.input as unknown[]).at(-1)).toEqual({ type: "compaction_trigger" });
+				expect(requests[0].headers.get("x-codex-beta-features")).toContain("remote_compaction_v2");
 				expect(requests[0].headers.get("chatgpt-account-id")).toBe("fake-account");
 				expect(requests[0].body.tools).toHaveLength(1);
 				expect(JSON.parse(requests[0].headers.get("x-codex-turn-metadata")!)).toMatchObject({
@@ -94,7 +124,8 @@ describe("native OpenAI compaction", () => {
 					thread_id: "session",
 				});
 			} else {
-				for (const key of ["tools", "reasoning", "client_metadata"]) expect(requests[0].body[key]).toBeUndefined();
+				for (const key of ["tools", "reasoning", "client_metadata", "stream", "store"])
+					expect(requests[0].body[key]).toBeUndefined();
 			}
 			const replay: Context = {
 				...context,
@@ -118,7 +149,7 @@ describe("native OpenAI compaction", () => {
 			}
 			const inputs = requests.slice(1).map((r) => r.body.input as unknown[]);
 			const start = api === "openai-responses" ? 1 : 0;
-			for (const input of inputs) expect(input.slice(start, start + output.length)).toEqual(output);
+			for (const input of inputs) expect(input.slice(start, start + expectedOutput.length)).toEqual(expectedOutput);
 			expect(inputs[1]).toEqual(inputs[0]);
 			expect(inputs[2].slice(0, inputs[0].length)).toEqual(inputs[0]);
 			expect(transformMessages(replay.messages, { ...m, id: "different-model" })[0]).toEqual(context.messages[0]);

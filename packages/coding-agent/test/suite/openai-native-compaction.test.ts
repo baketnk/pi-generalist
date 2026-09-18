@@ -1,4 +1,4 @@
-import { fauxAssistantMessage, type Model } from "@earendil-works/pi-ai";
+import { type Api, fauxAssistantMessage, type Model } from "@earendil-works/pi-ai";
 import { convertResponsesMessages } from "@earendil-works/pi-ai/api/openai-responses-shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { prepareCompaction } from "../../src/core/compaction/compaction.ts";
@@ -24,7 +24,7 @@ const output = [
 	{ type: "compaction", id: "cmp_1", encrypted_content: "synthetic-ciphertext" },
 ];
 const harnesses: Harness[] = [];
-async function setup(observedCompactions?: string[]): Promise<Harness> {
+async function setup(observedCompactions?: string[], requestModel: Model<Api> = nativeModel): Promise<Harness> {
 	const harness = await createHarness({
 		settings: { compaction: { enabled: false } },
 		extensionFactories: [
@@ -42,15 +42,20 @@ async function setup(observedCompactions?: string[]): Promise<Harness> {
 	harness.setResponses([fauxAssistantMessage("first answer"), fauxAssistantMessage("second answer")]);
 	await harness.session.prompt("first question");
 	await harness.session.prompt("second question");
-	await harness.authStorage.modify("openai", async () => ({ type: "api_key", key: "synthetic-key" }));
-	harness.session.agent.state.model = nativeModel;
+	const key = `header.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "synthetic-account" } })).toString("base64")}.signature`;
+	await harness.authStorage.modify(requestModel.provider, async () =>
+		requestModel.provider === "openai-codex"
+			? { type: "oauth", access: key, refresh: "synthetic-refresh", expires: Date.now() + 3_600_000 }
+			: { type: "api_key", key },
+	);
+	harness.session.agent.state.model = requestModel;
 	return harness;
 }
-function project(manager: SessionManager): unknown[] {
+function project(manager: SessionManager, requestModel: Model<Api> = nativeModel): unknown[] {
 	return convertResponsesMessages(
-		nativeModel,
+		requestModel,
 		{ messages: convertToLlm(manager.buildSessionContext().messages) },
-		new Set(["openai"]),
+		new Set(["openai", "openai-codex"]),
 	);
 }
 afterEach(() => {
@@ -60,6 +65,68 @@ afterEach(() => {
 });
 
 describe("native compaction session lifecycle", () => {
+	it.each(["manual", "threshold", "overflow"] as const)(
+		"persists Codex v2 %s compaction and replays it after reload",
+		async (reason) => {
+			const codexModel: Model<"openai-codex-responses"> = {
+				...nativeModel,
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				id: "gpt-6-astra",
+				baseUrl: "https://chatgpt.com/backend-api",
+			};
+			const harness = await setup(undefined, codexModel);
+			const before = project(harness.sessionManager, codexModel);
+			const oldEntries = harness.sessionManager.getEntries();
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (url: unknown, init?: RequestInit) => {
+					expect(String(url)).toBe("https://chatgpt.com/backend-api/codex/responses");
+					const body = JSON.parse(String(init?.body));
+					expect(body.input).toEqual([...before, { type: "compaction_trigger" }]);
+					expect(JSON.stringify(body)).not.toContain("TRANSIENT_REVOKABLE_PACKET");
+					return new Response(
+						[
+							{ type: "response.output_item.done", item: output[1] },
+							{ type: "response.completed", response: { id: "compacted", status: "completed" } },
+						]
+							.map((event) => `data: ${JSON.stringify(event)}\n\n`)
+							.join(""),
+					);
+				}),
+			);
+			if (reason === "manual") await harness.session.compact();
+			else {
+				const internal = harness.session as unknown as {
+					_runAutoCompaction(reason: "threshold" | "overflow", willRetry: boolean): Promise<boolean>;
+				};
+				expect(await internal._runAutoCompaction(reason, reason === "overflow")).toBe(reason === "overflow");
+			}
+			expect(harness.sessionManager.getEntries().slice(0, oldEntries.length)).toEqual(oldEntries);
+			const replacement = project(harness.sessionManager, codexModel);
+			expect(replacement).toEqual([
+				{ type: "message", role: "user", content: [{ type: "input_text", text: "first question" }] },
+				{ type: "message", role: "user", content: [{ type: "input_text", text: "second question" }] },
+				output[1],
+			]);
+			const restored = SessionManager.inMemory(
+				undefined,
+				undefined,
+				JSON.parse(JSON.stringify([harness.sessionManager.getHeader(), ...harness.sessionManager.getEntries()])),
+			);
+			expect(project(restored, codexModel)).toEqual(replacement);
+			restored.appendMessage({ role: "user", content: "after compact", timestamp: 5 });
+			expect(project(restored, codexModel)).toEqual([
+				...replacement,
+				{ role: "user", content: [{ type: "input_text", text: "after compact" }] },
+			]);
+			expect(JSON.stringify(project(restored, { ...codexModel, id: "another-model" }))).toContain("first question");
+			expect(JSON.stringify(project(restored, { ...codexModel, id: "another-model" }))).not.toContain(
+				"synthetic-ciphertext",
+			);
+		},
+	);
+
 	it("commits one full replacement, survives reload, and appends after the canonical window", async () => {
 		const harness = await setup();
 		let body: Record<string, unknown> = {};

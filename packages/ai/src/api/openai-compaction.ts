@@ -25,7 +25,7 @@ export function supportsNativeOpenAICompaction(model: Model<Api>, env?: Provider
 	);
 }
 
-/** Standalone stateless /responses/compact, not a generation request or a prose-summary fallback. */
+/** Native provider compaction: standalone JSON for OpenAI, streamed Responses v2 for Codex. */
 export async function compactOpenAI(
 	model: Model<Api>,
 	context: Context,
@@ -40,7 +40,7 @@ export async function compactOpenAI(
 		throw new Error("PI_OPENAI_COMPACTION_TIMEOUT_MS must be a positive integer (milliseconds)");
 	}
 	// Compaction can legitimately be silent for several minutes. Never borrow the
-	// streaming idle timeout or WebSocket handshake timeout for this JSON request.
+	// streaming idle timeout or WebSocket handshake timeout for compaction.
 	const timeout = new AbortController();
 	const timer = setTimeout(
 		() => timeout.abort(new Error(`OpenAI compaction timed out after ${timeoutMs}ms`)),
@@ -65,12 +65,13 @@ export async function compactOpenAI(
 		request.onResponse?.(response);
 		await options.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 		if (!response.ok) {
-			await response.body?.cancel();
+			const detail = (await response.text()).trim().slice(0, 1000);
 			throw new Error(
-				`OpenAI native compaction failed (HTTP ${response.status}); history is unchanged. PI_OPENAI_COMPACTION=off selects text compaction explicitly.`,
+				`OpenAI native compaction failed (HTTP ${response.status})${detail ? `: ${detail}` : ""}; history is unchanged. PI_OPENAI_COMPACTION=off selects text compaction explicitly.`,
 			);
 		}
-		const data: unknown = await response.json();
+		const data: unknown =
+			"readResponse" in request ? await request.readResponse(response, combined.signal) : await response.json();
 		combined.signal?.throwIfAborted();
 		if (!data || typeof data !== "object" || !("output" in data))
 			throw new Error("Invalid OpenAI compaction response");
@@ -83,12 +84,12 @@ export async function compactOpenAI(
 			const raw = data.usage as Record<string, unknown>;
 			const input = raw.input_tokens,
 				output = raw.output_tokens;
-			const cached =
-				raw.input_tokens_details &&
-				typeof raw.input_tokens_details === "object" &&
-				"cached_tokens" in raw.input_tokens_details
-					? raw.input_tokens_details.cached_tokens
-					: 0;
+			const details =
+				raw.input_tokens_details && typeof raw.input_tokens_details === "object"
+					? (raw.input_tokens_details as Record<string, unknown>)
+					: undefined;
+			const cached = details?.cached_tokens ?? 0;
+			const written = details?.cache_write_tokens ?? 0;
 			if (
 				typeof input === "number" &&
 				Number.isSafeInteger(input) &&
@@ -99,13 +100,16 @@ export async function compactOpenAI(
 				typeof cached === "number" &&
 				Number.isSafeInteger(cached) &&
 				cached >= 0 &&
-				cached <= input
+				typeof written === "number" &&
+				Number.isSafeInteger(written) &&
+				written >= 0 &&
+				cached + written <= input
 			) {
 				usage = {
-					input: input - cached,
+					input: input - cached - written,
 					output,
 					cacheRead: cached,
-					cacheWrite: 0,
+					cacheWrite: written,
 					totalTokens: input + output,
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				};
@@ -123,6 +127,9 @@ export async function compactOpenAI(
 			},
 			usage,
 		};
+	} catch (error) {
+		combined.signal?.throwIfAborted();
+		throw error;
 	} finally {
 		clearTimeout(timer);
 		combined.cleanup();

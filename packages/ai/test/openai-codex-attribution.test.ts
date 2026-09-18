@@ -7,6 +7,7 @@ import {
 	stream as streamOpenAICodexResponses,
 	streamSimple as streamSimpleOpenAICodexResponses,
 } from "../src/api/openai-codex-responses.ts";
+import { compactOpenAI } from "../src/api/openai-compaction.ts";
 import { cleanupSessionResources } from "../src/session-resources.ts";
 import type { AgentRequestIdentity, Context, Model } from "../src/types.ts";
 
@@ -159,6 +160,88 @@ function decodeRequestBody(body: RequestInit["body"] | undefined): Record<string
 }
 
 describe("OpenAI Codex attribution", () => {
+	it("keeps cached deltas after failed compaction and reestablishes them after a successful checkpoint", async () => {
+		const { frames, handshakes } = captureWebSocketRequests((index) => [
+			{ type: "codex.response.metadata", headers: { "x-codex-turn-state": "foreground" } },
+			...completedEvents(`response-${index}`),
+		]);
+		const options = {
+			apiKey: token(),
+			transport: "auto" as const,
+			sessionId: identity.sessionId,
+			requestIdentity: identity,
+		};
+		const first = await streamOpenAICodexResponses(model, context, options).result();
+		const before: Context = {
+			...context,
+			messages: [...context.messages, first, { role: "user", content: "next", timestamp: 2 }],
+		};
+		const compactionOptions = {
+			...options,
+			requestIdentity: { ...identity, turnId: "compact", requestKind: "compaction" as const },
+		};
+		await expect(
+			compactOpenAI(model, before, {
+				...compactionOptions,
+				fetch: async () => new Response("not available", { status: 404 }),
+			}),
+		).rejects.toThrow("HTTP 404");
+		const second = await streamOpenAICodexResponses(model, before, options).result();
+		expect(second.stopReason).toBe("stop");
+		before.messages.push(second);
+		const compacted = await compactOpenAI(model, before, {
+			...compactionOptions,
+			fetch: async (_url, init) => {
+				const body = JSON.parse(String(init?.body));
+				expect(body.input.at(-1)).toEqual({ type: "compaction_trigger" });
+				expect(body.client_metadata.turn_id).toBe("compact");
+				return new Response(
+					[
+						{ type: "codex.response.metadata", headers: { "x-codex-turn-state": "compactor" } },
+						{ type: "response.output_item.done", item: { type: "compaction", encrypted_content: "opaque" } },
+						{ type: "response.completed", response: { id: "compact-response", status: "completed" } },
+					]
+						.map((event) => `data: ${JSON.stringify(event)}\n\n`)
+						.join(""),
+				);
+			},
+		});
+		const after: Context = {
+			...context,
+			messages: [
+				{
+					role: "user",
+					content: [],
+					timestamp: 3,
+					openaiCompaction: { ...compacted.compaction, fallback: before.messages },
+				},
+			],
+		};
+		const postCompactionOptions = { ...options, requestIdentity: { ...identity, windowId: "new-window" } };
+		const third = await streamOpenAICodexResponses(model, after, postCompactionOptions).result();
+		expect(third.stopReason).toBe("stop");
+		after.messages.push(third, { role: "user", content: "after checkpoint", timestamp: 4 });
+		expect(
+			(
+				await streamOpenAICodexResponses(model, after, {
+					...postCompactionOptions,
+					requestIdentity: { ...postCompactionOptions.requestIdentity, turnId: "next-turn" },
+				}).result()
+			).stopReason,
+		).toBe("stop");
+		expect(handshakes).toHaveLength(1);
+		expect(handshakes[0]?.["x-codex-beta-features"]).toContain("remote_compaction_v2");
+		expect(frames.map((frame) => frame.previous_response_id)).toEqual([
+			undefined,
+			"response-1",
+			undefined,
+			"response-3",
+		]);
+		expect(frames[2].input).toEqual(compacted.compaction.output);
+		expect(frames[2].client_metadata?.["x-codex-turn-state"]).toBe("foreground");
+		expect(frames[3].input).toEqual([{ role: "user", content: [{ type: "input_text", text: "after checkpoint" }] }]);
+	});
+
 	it("sends canonical identity in SSE headers and client_metadata independently of caching", async () => {
 		let capturedHeaders: Headers | undefined;
 		let capturedBody: Record<string, unknown> | undefined;
