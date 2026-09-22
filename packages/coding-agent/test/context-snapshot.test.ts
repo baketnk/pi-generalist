@@ -57,9 +57,13 @@ test("snapshot exposes transform failure and potential later payload rewriting",
 	let snapshot: ContextSnapshotEvent | undefined;
 	const { runner } = await runnerFor([
 		(pi) => {
-			pi.on("context", () => { throw new Error("transform failed"); });
+			pi.on("context", () => {
+				throw new Error("transform failed");
+			});
 			pi.on("before_provider_request", () => undefined);
-			pi.on("context_snapshot", (event) => { snapshot = event; });
+			pi.on("context_snapshot", (event) => {
+				snapshot = event;
+			});
 		},
 	]);
 	expect(await runner.emitContext([])).toEqual([]);

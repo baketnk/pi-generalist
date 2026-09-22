@@ -1,4 +1,4 @@
-import type { JsonValue } from "../types.ts";
+import type { JsonObject, JsonValue } from "../types.ts";
 import { assertCompactedOutput } from "../utils/openai-compaction.ts";
 
 // Codex remote compaction v2 retains recent user text alongside its opaque item.
@@ -9,19 +9,16 @@ function isObject(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function isJsonObject(value: JsonValue): value is JsonObject {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function retainUserMessages(input: JsonValue[]): JsonValue[] {
 	let remaining = RETAINED_USER_TOKEN_BUDGET;
 	const retained: JsonValue[] = [];
 	for (let i = input.length - 1; i >= 0 && remaining > 0; i--) {
 		const item = input[i];
-		if (
-			!item ||
-			typeof item !== "object" ||
-			Array.isArray(item) ||
-			item.role !== "user" ||
-			(item.type !== undefined && item.type !== "message")
-		)
-			continue;
+		if (!isJsonObject(item) || item.role !== "user" || (item.type !== undefined && item.type !== "message")) continue;
 		const message = structuredClone(item);
 		const content =
 			typeof message.content === "string" ? [{ type: "input_text", text: message.content }] : message.content;
@@ -29,7 +26,7 @@ function retainUserMessages(input: JsonValue[]): JsonValue[] {
 		let characters = remaining * 4;
 		const parts: JsonValue[] = [];
 		for (const part of content) {
-			if (part && typeof part === "object" && !Array.isArray(part) && typeof part.text === "string") {
+			if (isJsonObject(part) && typeof part.text === "string") {
 				if (characters === 0) continue;
 				if (part.text.length > characters) {
 					const head = Math.ceil((characters - 1) / 2);

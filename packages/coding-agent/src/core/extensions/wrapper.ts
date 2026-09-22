@@ -6,6 +6,7 @@
  */
 
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { JsonObject } from "@earendil-works/pi-ai";
 import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
 import type { ExtensionRunner } from "./runner.ts";
 import type { RegisteredTool } from "./types.ts";
@@ -24,7 +25,7 @@ export function wrapRegisteredTool(registeredTool: RegisteredTool, runner: Exten
 			const invoker = execution?.tools;
 			const guardedExecution = invoker && {
 				tools: {
-					invoke: (name: string, args: Record<string, unknown>, options?: { signal?: AbortSignal }) => {
+					invoke: (name: string, args: JsonObject, options?: { signal?: AbortSignal }) => {
 						runner.getActiveTools(); // Throws for an invalidated extension runtime.
 						return invoker.invoke(name, args, options);
 					},

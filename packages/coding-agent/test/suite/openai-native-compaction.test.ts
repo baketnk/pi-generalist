@@ -1,4 +1,4 @@
-import { type Api, fauxAssistantMessage, type Model } from "@earendil-works/pi-ai";
+import { type Api, fauxAssistantMessage, type Model, normalizeContext } from "@earendil-works/pi-ai";
 import { convertResponsesMessages } from "@earendil-works/pi-ai/api/openai-responses-shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { prepareCompaction } from "../../src/core/compaction/compaction.ts";
@@ -54,8 +54,9 @@ async function setup(observedCompactions?: string[], requestModel: Model<Api> = 
 function project(manager: SessionManager, requestModel: Model<Api> = nativeModel): unknown[] {
 	return convertResponsesMessages(
 		requestModel,
-		{ messages: convertToLlm(manager.buildSessionContext().messages) },
+		normalizeContext({ messages: convertToLlm(manager.buildSessionContext().messages) }),
 		new Set(["openai", "openai-codex"]),
+		requestModel.api === "openai-codex-responses" ? { includeSystemPrompt: false } : undefined,
 	);
 }
 afterEach(() => {
@@ -84,6 +85,7 @@ describe("native compaction session lifecycle", () => {
 					expect(String(url)).toBe("https://chatgpt.com/backend-api/codex/responses");
 					const body = JSON.parse(String(init?.body));
 					expect(body.input).toEqual([...before, { type: "compaction_trigger" }]);
+					expect(body.instructions).toContain("You are an expert coding assistant");
 					expect(JSON.stringify(body)).not.toContain("TRANSIENT_REVOKABLE_PACKET");
 					return new Response(
 						[
@@ -140,23 +142,24 @@ describe("native compaction session lifecycle", () => {
 		const before = project(harness.sessionManager);
 		const oldEntries = harness.sessionManager.getEntries();
 		const result = await harness.session.compact();
-		expect(body.input).toEqual(before);
+		expect(body.input).toEqual(before.slice(1));
+		expect(body.instructions).toBe((before[0] as { content: string }).content);
 		expect(JSON.stringify(body)).not.toContain("TRANSIENT_REVOKABLE_PACKET");
 		expect(result.details).toMatchObject({ openaiCompaction: { output } });
 		expect(harness.sessionManager.getEntries().slice(0, oldEntries.length)).toEqual(oldEntries);
-		expect(harness.session.messages).toHaveLength(1);
-		expect(project(harness.sessionManager)).toEqual(output);
+		expect(harness.session.messages).toHaveLength(2);
+		expect(project(harness.sessionManager)).toEqual([before[0], ...output]);
 		const restored = SessionManager.inMemory(
 			undefined,
 			undefined,
 			JSON.parse(JSON.stringify([harness.sessionManager.getHeader(), ...harness.sessionManager.getEntries()])),
 		);
-		expect(project(restored)).toEqual(output);
+		expect(project(restored)).toEqual([before[0], ...output]);
 		restored.appendMessage({ role: "user", content: "next turn", timestamp: 3 });
-		expect(project(restored).slice(0, output.length)).toEqual(output);
+		expect(project(restored).slice(1, output.length + 1)).toEqual(output);
 		const foreign = convertResponsesMessages(
 			{ ...nativeModel, id: "different-model" },
-			{ messages: convertToLlm(restored.buildSessionContext().messages) },
+			normalizeContext({ messages: convertToLlm(restored.buildSessionContext().messages) }),
 			new Set(["openai"]),
 		);
 		expect(JSON.stringify(foreign)).not.toContain("synthetic-ciphertext");
@@ -187,7 +190,7 @@ describe("native compaction session lifecycle", () => {
 		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
 		await harness.session.compact();
 		expect((bodies[1].input as unknown[]).slice(0, output.length)).toEqual(output);
-		expect(project(harness.sessionManager)).toHaveLength(output.length);
+		expect(project(harness.sessionManager)).toHaveLength(output.length + 1);
 		expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(2);
 		expect(observedCompactions).toEqual(
 			harness.sessionManager
@@ -235,6 +238,6 @@ describe("native compaction session lifecycle", () => {
 		};
 		expect(await internal._runAutoCompaction(reason, reason === "overflow")).toBe(reason === "overflow");
 		expect(fetch).toHaveBeenCalledTimes(1);
-		expect(project(harness.sessionManager)).toEqual(output);
+		expect(project(harness.sessionManager).slice(1)).toEqual(output);
 	});
 });

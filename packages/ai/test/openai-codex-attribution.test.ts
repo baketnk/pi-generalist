@@ -10,6 +10,7 @@ import {
 import { compactOpenAI } from "../src/api/openai-compaction.ts";
 import { cleanupSessionResources } from "../src/session-resources.ts";
 import type { AgentRequestIdentity, Context, Model } from "../src/types.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 
 afterEach(() => {
 	cleanupSessionResources();
@@ -171,7 +172,7 @@ describe("OpenAI Codex attribution", () => {
 			sessionId: identity.sessionId,
 			requestIdentity: identity,
 		};
-		const first = await streamOpenAICodexResponses(model, context, options).result();
+		const first = await streamOpenAICodexResponses(model, normalizeContext(context), options).result();
 		const before: Context = {
 			...context,
 			messages: [...context.messages, first, { role: "user", content: "next", timestamp: 2 }],
@@ -186,7 +187,7 @@ describe("OpenAI Codex attribution", () => {
 				fetch: async () => new Response("not available", { status: 404 }),
 			}),
 		).rejects.toThrow("HTTP 404");
-		const second = await streamOpenAICodexResponses(model, before, options).result();
+		const second = await streamOpenAICodexResponses(model, normalizeContext(before), options).result();
 		expect(second.stopReason).toBe("stop");
 		before.messages.push(second);
 		const compacted = await compactOpenAI(model, before, {
@@ -218,12 +219,12 @@ describe("OpenAI Codex attribution", () => {
 			],
 		};
 		const postCompactionOptions = { ...options, requestIdentity: { ...identity, windowId: "new-window" } };
-		const third = await streamOpenAICodexResponses(model, after, postCompactionOptions).result();
+		const third = await streamOpenAICodexResponses(model, normalizeContext(after), postCompactionOptions).result();
 		expect(third.stopReason).toBe("stop");
 		after.messages.push(third, { role: "user", content: "after checkpoint", timestamp: 4 });
 		expect(
 			(
-				await streamOpenAICodexResponses(model, after, {
+				await streamOpenAICodexResponses(model, normalizeContext(after), {
 					...postCompactionOptions,
 					requestIdentity: { ...postCompactionOptions.requestIdentity, turnId: "next-turn" },
 				}).result()
@@ -257,7 +258,7 @@ describe("OpenAI Codex attribution", () => {
 			}),
 		);
 
-		await streamSimpleOpenAICodexResponses(model, context, {
+		await streamSimpleOpenAICodexResponses(model, normalizeContext(context), {
 			apiKey: token(),
 			transport: "sse",
 			cacheRetention: "none",
@@ -304,16 +305,12 @@ describe("OpenAI Codex attribution", () => {
 			const nextIdentity = { ...identity, turnId: "turn-2", startedAt: identity.startedAt + 1000 };
 			const messages = [...context.messages];
 			for (const requestIdentity of [identity, nextIdentity, undefined]) {
-				const result = await streamOpenAICodexResponses(
-					model,
-					{ ...context, messages },
-					{
-						apiKey: token(),
-						transport,
-						sessionId: identity.sessionId,
-						requestIdentity,
-					},
-				).result();
+				const result = await streamOpenAICodexResponses(model, normalizeContext({ ...context, messages }), {
+					apiKey: token(),
+					transport,
+					sessionId: identity.sessionId,
+					requestIdentity,
+				}).result();
 				expect(result.stopReason).toBe("stop");
 				expect(result.content).toMatchObject([{ type: "text", text: "Hello" }]);
 				messages.push(result, { role: "user", content: "next", timestamp: 2 });
@@ -355,7 +352,7 @@ describe("OpenAI Codex attribution", () => {
 				sessionId: identity.sessionId,
 				requestIdentity: identity,
 			};
-			const first = await streamOpenAICodexResponses(model, context, options).result();
+			const first = await streamOpenAICodexResponses(model, normalizeContext(context), options).result();
 			expect(first.stopReason).toBe("stop");
 			const nextContext: Context = {
 				...context,
@@ -366,7 +363,7 @@ describe("OpenAI Codex attribution", () => {
 				nextContext.tools = [{ name: "probe", description: "A new tool", parameters: Type.Object({}) }];
 			if (change === "prefix") nextContext.messages[0] = { role: "user", content: "changed", timestamp: 1 };
 			if (change === "shorter context") nextContext.messages = [{ role: "user", content: "next", timestamp: 2 }];
-			const second = await streamOpenAICodexResponses(model, nextContext, {
+			const second = await streamOpenAICodexResponses(model, normalizeContext(nextContext), {
 				...options,
 				requestIdentity: { ...identity, turnId: "turn-2", startedAt: 987654321 },
 				...(change === "reasoning" ? { reasoningEffort: "high" as const } : {}),
@@ -392,7 +389,7 @@ describe("OpenAI Codex attribution", () => {
 			}),
 		);
 
-		await streamOpenAICodexResponses(model, context, {
+		await streamOpenAICodexResponses(model, normalizeContext(context), {
 			apiKey: token(),
 			transport: "sse",
 			requestIdentity: identity,
@@ -443,7 +440,12 @@ describe("OpenAI Codex turn routing", () => {
 			{ ...identity, turnId: "next" },
 		]) {
 			expect(
-				(await streamOpenAICodexResponses(model, context, { ...options, requestIdentity }).result()).stopReason,
+				(
+					await streamOpenAICodexResponses(model, normalizeContext(context), {
+						...options,
+						requestIdentity,
+					}).result()
+				).stopReason,
 			).toBe("stop");
 		}
 		expect(headers.map((h) => h.get("x-codex-turn-state"))).toEqual([null, "state-1", null, "state-1", null]);
@@ -459,7 +461,8 @@ describe("OpenAI Codex turn routing", () => {
 				: sseResponse(),
 		);
 		expect(
-			(await streamOpenAICodexResponses(model, context, { ...options, maxRetries: 1 }).result()).stopReason,
+			(await streamOpenAICodexResponses(model, normalizeContext(context), { ...options, maxRetries: 1 }).result())
+				.stopReason,
 		).toBe("stop");
 		expect(headers.map((h) => h.get("x-codex-turn-state"))).toEqual([null, "retry-state"]);
 	});
@@ -480,11 +483,10 @@ describe("OpenAI Codex turn routing", () => {
 			const messages = [...context.messages];
 			for (let index = 0; index < 4; index++) {
 				if (index === 2) closeOpenAICodexWebSocketSessions(identity.sessionId);
-				const result = await streamOpenAICodexResponses(
-					model,
-					{ ...context, messages },
-					{ ...wsOptions, requestIdentity: index === 3 ? { ...identity, turnId: "next" } : identity },
-				).result();
+				const result = await streamOpenAICodexResponses(model, normalizeContext({ ...context, messages }), {
+					...wsOptions,
+					requestIdentity: index === 3 ? { ...identity, turnId: "next" } : identity,
+				}).result();
 				expect(result.stopReason).toBe("stop");
 				messages.push(result, { role: "user", content: "next", timestamp: 2 });
 			}
@@ -504,7 +506,7 @@ describe("OpenAI Codex turn routing", () => {
 		const headers = captureSSE();
 		expect(
 			(
-				await streamOpenAICodexResponses(model, context, {
+				await streamOpenAICodexResponses(model, normalizeContext(context), {
 					...options,
 					transport: "auto",
 					sessionId: identity.sessionId,
@@ -523,9 +525,13 @@ describe("OpenAI Codex turn routing", () => {
 			cacheRetention: "short" as const,
 			sessionId: identity.sessionId,
 		};
-		expect((await streamOpenAICodexResponses(model, context, retryOptions).result()).stopReason).toBe("error");
+		expect(
+			(await streamOpenAICodexResponses(model, normalizeContext(context), retryOptions).result()).stopReason,
+		).toBe("error");
 		expect(headers).toHaveLength(0);
-		expect((await streamOpenAICodexResponses(model, context, retryOptions).result()).stopReason).toBe("stop");
+		expect(
+			(await streamOpenAICodexResponses(model, normalizeContext(context), retryOptions).result()).stopReason,
+		).toBe("stop");
 		expect(headers[0].get("x-codex-turn-state")).toBe("partial");
 	});
 
@@ -533,11 +539,11 @@ describe("OpenAI Codex turn routing", () => {
 		"isolates routing after %s changes",
 		async (change) => {
 			const headers = captureSSE();
-			await streamOpenAICodexResponses(model, context, options).result();
+			await streamOpenAICodexResponses(model, normalizeContext(context), options).result();
 			if (change === "cleanup") cleanupSessionResources(identity.sessionId);
 			await streamOpenAICodexResponses(
 				change === "endpoint" ? { ...model, baseUrl: "https://example.test" } : model,
-				context,
+				normalizeContext(context),
 				{
 					...options,
 					apiKey: change === "account" ? token("account-2") : token(),
@@ -549,7 +555,7 @@ describe("OpenAI Codex turn routing", () => {
 			).result();
 			expect(headers[1].get("x-codex-turn-state")).toBeNull();
 			if (change === "account" || change === "endpoint") {
-				await streamOpenAICodexResponses(model, context, options).result();
+				await streamOpenAICodexResponses(model, normalizeContext(context), options).result();
 				expect(headers[2].get("x-codex-turn-state")).toBeNull();
 			}
 		},
@@ -560,12 +566,19 @@ describe("OpenAI Codex turn routing", () => {
 			metadata("server"),
 			...completedEvents(`response-${index}`),
 		]);
-		await streamOpenAICodexResponses(model, context, { ...options, transport: "websocket" }).result();
-		await streamOpenAICodexResponses({ ...model, headers: { "X-Codex-Turn-State": "model" } }, context, {
+		await streamOpenAICodexResponses(model, normalizeContext(context), {
 			...options,
 			transport: "websocket",
-			headers: { "X-CODEX-TURN-STATE": override },
 		}).result();
+		await streamOpenAICodexResponses(
+			{ ...model, headers: { "X-Codex-Turn-State": "model" } },
+			normalizeContext(context),
+			{
+				...options,
+				transport: "websocket",
+				headers: { "X-CODEX-TURN-STATE": override },
+			},
+		).result();
 		expect(handshakes[1]?.["x-codex-turn-state"]).toBe(override ?? undefined);
 		expect(frames[1].client_metadata?.["x-codex-turn-state"]).toBe(override ?? undefined);
 	});
@@ -573,7 +586,7 @@ describe("OpenAI Codex turn routing", () => {
 	it("does not infer a logical turn from cache identity", async () => {
 		const headers = captureSSE();
 		for (let i = 0; i < 2; i++)
-			await streamOpenAICodexResponses(model, context, {
+			await streamOpenAICodexResponses(model, normalizeContext(context), {
 				...options,
 				requestIdentity: undefined,
 				sessionId: "cache",
@@ -584,7 +597,9 @@ describe("OpenAI Codex turn routing", () => {
 	it("captures SSE metadata when no response header carries state", async () => {
 		const headers = captureSSE(() => sseResponse("", [metadata("event-state"), ...completedEvents()]));
 		for (let i = 0; i < 2; i++) {
-			expect((await streamOpenAICodexResponses(model, context, options).result()).stopReason).toBe("stop");
+			expect((await streamOpenAICodexResponses(model, normalizeContext(context), options).result()).stopReason).toBe(
+				"stop",
+			);
 		}
 		expect(headers.map((h) => h.get("x-codex-turn-state"))).toEqual([null, "event-state"]);
 	});
@@ -594,7 +609,7 @@ describe("OpenAI Codex turn routing", () => {
 			cleanupSessionResources(identity.sessionId);
 			return sseResponse("late-state");
 		});
-		for (let i = 0; i < 2; i++) await streamOpenAICodexResponses(model, context, options).result();
+		for (let i = 0; i < 2; i++) await streamOpenAICodexResponses(model, normalizeContext(context), options).result();
 		expect(headers.map((h) => h.get("x-codex-turn-state"))).toEqual([null, null]);
 	});
 
@@ -608,7 +623,12 @@ describe("OpenAI Codex turn routing", () => {
 				: completedEvents(),
 		);
 		expect(
-			(await streamOpenAICodexResponses(model, context, { ...options, transport: "auto" }).result()).stopReason,
+			(
+				await streamOpenAICodexResponses(model, normalizeContext(context), {
+					...options,
+					transport: "auto",
+				}).result()
+			).stopReason,
 		).toBe("stop");
 		expect(frames.map((f) => f.client_metadata?.["x-codex-turn-state"])).toEqual([undefined, "retry-state"]);
 		expect(handshakes.map((h) => h?.["x-codex-turn-state"])).toEqual([undefined, undefined]);
@@ -623,21 +643,25 @@ describe("OpenAI Codex turn routing", () => {
 		]);
 		for (let i = 0; i < 2; i++)
 			expect(
-				(await streamOpenAICodexResponses(model, context, { ...options, transport: "websocket" }).result())
-					.stopReason,
+				(
+					await streamOpenAICodexResponses(model, normalizeContext(context), {
+						...options,
+						transport: "websocket",
+					}).result()
+				).stopReason,
 			).toBe("stop");
 		expect(frames[1].client_metadata?.["x-codex-turn-state"]).toBe("valid");
 	});
 
 	it("does not let unrelated sessions evict a foreground turn", async () => {
 		const headers = captureSSE();
-		await streamOpenAICodexResponses(model, context, options).result();
+		await streamOpenAICodexResponses(model, normalizeContext(context), options).result();
 		for (let i = 0; i < 257; i++)
-			await streamOpenAICodexResponses(model, context, {
+			await streamOpenAICodexResponses(model, normalizeContext(context), {
 				...options,
 				requestIdentity: { ...identity, sessionId: `session-${i}`, threadId: `thread-${i}`, turnId: `turn-${i}` },
 			}).result();
-		await streamOpenAICodexResponses(model, context, options).result();
+		await streamOpenAICodexResponses(model, normalizeContext(context), options).result();
 		expect(headers.at(-1)?.get("x-codex-turn-state")).toBe("first");
 	});
 
@@ -661,12 +685,12 @@ describe("OpenAI Codex turn routing", () => {
 			cacheRetention: "short" as const,
 			sessionId: identity.sessionId,
 		};
-		const pending = streamOpenAICodexResponses(model, context, wsOptions).result();
+		const pending = streamOpenAICodexResponses(model, normalizeContext(context), wsOptions).result();
 		await vi.waitFor(() => expect(opens).toHaveLength(1));
 		if (change === "cleanup") cleanupSessionResources(identity.sessionId);
 		const currentOptions = { ...wsOptions, apiKey: change === "account" ? token("account-2") : token() };
 		const currentModel = change === "endpoint" ? { ...model, baseUrl: "https://other.test" } : model;
-		const current = streamOpenAICodexResponses(currentModel, context, currentOptions).result();
+		const current = streamOpenAICodexResponses(currentModel, normalizeContext(context), currentOptions).result();
 		await vi.waitFor(() => expect(opens).toHaveLength(2));
 		opens[1]();
 		expect((await current).stopReason).toBe("stop");
@@ -674,9 +698,10 @@ describe("OpenAI Codex turn routing", () => {
 		else failures[0]();
 		expect((await pending).stopReason).toBe("error");
 		expect(globalThis.fetch).not.toHaveBeenCalled();
-		expect((await streamOpenAICodexResponses(currentModel, context, currentOptions).result()).stopReason).toBe(
-			"stop",
-		);
+		expect(
+			(await streamOpenAICodexResponses(currentModel, normalizeContext(context), currentOptions).result())
+				.stopReason,
+		).toBe("stop");
 		expect(frames).toHaveLength(2);
 		expect(handshakes).toHaveLength(2);
 	});
@@ -690,15 +715,17 @@ describe("OpenAI Codex turn routing", () => {
 			cacheRetention: "short" as const,
 			sessionId: identity.sessionId,
 		};
-		const first = streamOpenAICodexResponses(model, context, wsOptions).result();
-		const second = streamOpenAICodexResponses(model, context, wsOptions).result();
+		const first = streamOpenAICodexResponses(model, normalizeContext(context), wsOptions).result();
+		const second = streamOpenAICodexResponses(model, normalizeContext(context), wsOptions).result();
 		await vi.waitFor(() => expect(opens).toHaveLength(2));
 		opens[0]();
 		expect((await first).stopReason).toBe("stop");
 		opens[1]();
 		expect((await second).stopReason).toBe("stop");
 		expect(sockets.map((socket) => socket.readyState)).toEqual([1, 3]);
-		expect((await streamOpenAICodexResponses(model, context, wsOptions).result()).stopReason).toBe("stop");
+		expect((await streamOpenAICodexResponses(model, normalizeContext(context), wsOptions).result()).stopReason).toBe(
+			"stop",
+		);
 		expect(handshakes).toHaveLength(2);
 		cleanupSessionResources(identity.sessionId);
 		expect(sockets.map((socket) => socket.readyState)).toEqual([3, 3]);
@@ -712,14 +739,14 @@ describe("OpenAI Codex turn routing", () => {
 			cacheRetention: "short" as const,
 			sessionId: identity.sessionId,
 		};
-		await streamOpenAICodexResponses(model, context, wsOptions).result();
+		await streamOpenAICodexResponses(model, normalizeContext(context), wsOptions).result();
 		captureSSE();
-		await streamOpenAICodexResponses(model, context, {
+		await streamOpenAICodexResponses(model, normalizeContext(context), {
 			...wsOptions,
 			transport: "sse",
 			apiKey: token("account-2"),
 		}).result();
-		await streamOpenAICodexResponses(model, context, wsOptions).result();
+		await streamOpenAICodexResponses(model, normalizeContext(context), wsOptions).result();
 		expect(handshakes).toHaveLength(2);
 		expect(frames.map((f) => f.previous_response_id)).toEqual([undefined, undefined]);
 	});
@@ -727,7 +754,7 @@ describe("OpenAI Codex turn routing", () => {
 	it("discards the previous foreground turn when a new one starts", async () => {
 		const headers = captureSSE();
 		for (const turnId of ["old", "new", "old"]) {
-			await streamOpenAICodexResponses(model, context, {
+			await streamOpenAICodexResponses(model, normalizeContext(context), {
 				...options,
 				requestIdentity: { ...identity, turnId },
 			}).result();
@@ -746,7 +773,7 @@ describe("OpenAI Codex turn routing", () => {
 			for (let index = 0; index < 3; index++) {
 				const result = await streamOpenAICodexResponses(
 					index === 1 && change === "endpoint" ? { ...model, baseUrl: "https://other.test" } : model,
-					{ ...context, messages },
+					normalizeContext({ ...context, messages }),
 					{
 						...options,
 						transport: "auto",

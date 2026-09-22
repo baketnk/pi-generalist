@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import type { NestedToolInvoker } from "@earendil-works/pi-agent-core";
+import type { JsonObject, JsonValue } from "@earendil-works/pi-ai";
 
 export const CODE_MAX_BYTES = 64 * 1024;
 export const OUTPUT_MAX_BYTES = 50 * 1024;
@@ -109,7 +110,11 @@ export async function runCell(options: CellOptions): Promise<CellResult> {
 		outgoing.write(`${line}\n`);
 	}
 
-	async function handleCall(message: Record<string, unknown>) {
+	function isJsonObject(value: JsonValue): value is JsonObject {
+		return value !== null && typeof value === "object" && !Array.isArray(value);
+	}
+
+	async function handleCall(message: JsonObject) {
 		const { id, name, args } = message;
 		if (
 			typeof id !== "number" ||
@@ -118,9 +123,8 @@ export async function runCell(options: CellOptions): Promise<CellResult> {
 			requestIds.has(id) ||
 			typeof name !== "string" ||
 			!options.tools.includes(name) ||
-			!args ||
-			typeof args !== "object" ||
-			Array.isArray(args)
+			args === undefined ||
+			!isJsonObject(args)
 		) {
 			stop("Invalid or unavailable nested tool request");
 			return;
@@ -136,7 +140,7 @@ export async function runCell(options: CellOptions): Promise<CellResult> {
 		}
 		options.onProgress?.(`Nested call ${calls}: ${name}`);
 		try {
-			const result = await options.invoke(name, args as Record<string, unknown>, { signal: controller.signal });
+			const result = await options.invoke(name, args, { signal: controller.signal });
 			if (finished) return;
 			// Do not transport image payloads into this text-only MVP or silently erase them.
 			if (result.content.some((block) => block.type !== "text")) {
@@ -179,12 +183,12 @@ export async function runCell(options: CellOptions): Promise<CellResult> {
 			stop("Worker frame exceeds 1 MiB");
 			return;
 		}
-		const message: unknown = JSON.parse(line);
-		if (!message || typeof message !== "object" || !("type" in message)) {
+		const message = JSON.parse(line) as JsonValue;
+		if (!isJsonObject(message) || !("type" in message)) {
 			stop("Malformed worker frame");
 			return;
 		}
-		const value = message as Record<string, unknown>;
+		const value = message;
 		switch (value.type) {
 			case "text":
 				if (typeof value.text !== "string") {

@@ -1,6 +1,13 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { type Api, type Context, fauxAssistantMessage, fauxToolCall, type Model } from "@earendil-works/pi-ai";
+import {
+	type Api,
+	fauxAssistantMessage,
+	fauxToolCall,
+	type Model,
+	normalizeContext,
+	type TranscriptContext,
+} from "@earendil-works/pi-ai";
 import { getModel, streamSimple } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it } from "vitest";
 import codeMode from "../examples/extensions/code-mode/index.ts";
@@ -16,7 +23,7 @@ afterEach(() => {
 
 // Exercise real provider serializers, but throw at onPayload BEFORE transport.
 // Keys and URLs are synthetic; no credential discovery or model request occurs.
-async function project(model: Model<Api>, context: Context): Promise<Record<string, unknown>> {
+async function project(model: Model<Api>, context: TranscriptContext): Promise<Record<string, unknown>> {
 	let payload: Record<string, unknown> | undefined;
 	const stream = streamSimple({ ...model, baseUrl: "http://127.0.0.1:9" }, context, {
 		apiKey:
@@ -40,14 +47,10 @@ async function runFixture() {
 	await writeFile(join(h.tempDir, "manifest.json"), JSON.stringify({ files: ["one.txt", "two.txt"] }));
 	await writeFile(join(h.tempDir, "one.txt"), "old\n");
 	await writeFile(join(h.tempDir, "two.txt"), "other\n");
-	const contexts: Context[] = [];
+	const contexts: TranscriptContext[] = [];
 	const original = h.session.agent.streamFunction;
 	h.session.agent.streamFunction = (model, context, options) => {
-		contexts.push({
-			systemPrompt: context.systemPrompt,
-			messages: structuredClone(context.messages),
-			tools: context.tools?.map(({ name, description, parameters }) => ({ name, description, parameters })),
-		});
+		contexts.push(normalizeContext({ messages: structuredClone(context.messages) }));
 		return original(model, context, options);
 	};
 	h.setResponses([

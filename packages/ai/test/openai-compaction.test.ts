@@ -7,17 +7,18 @@ import { stream as codexStream } from "../src/api/openai-codex-responses.ts";
 import { compactOpenAI, supportsNativeOpenAICompaction } from "../src/api/openai-compaction.ts";
 import { stream as responsesStream } from "../src/api/openai-responses.ts";
 import { transformMessages } from "../src/api/transform-messages.ts";
-import type { Context, Model, OpenAICompaction, SimpleStreamOptions } from "../src/types.ts";
+import type { Model, OpenAICompaction, SimpleStreamOptions, TranscriptContext } from "../src/types.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 
 const output = [
 	{ type: "message", id: "retained-user", role: "user", content: [{ type: "input_text", text: "original question" }] },
 	{ type: "compaction", id: "cmp_1", encrypted_content: "synthetic-opaque-state", future_field: { preserve: true } },
 ];
-const context: Context = {
+const context = normalizeContext({
 	systemPrompt: "Stable instructions",
 	messages: [{ role: "user", content: "original question", timestamp: 1 }],
 	tools: [{ name: "probe", description: "Synthetic tool", parameters: Type.Object({}) }],
-};
+});
 const identity = {
 	sessionId: "session",
 	threadId: "session",
@@ -107,7 +108,7 @@ describe("native OpenAI compaction", () => {
 					? "https://api.openai.com/v1/responses/compact"
 					: "https://chatgpt.com/backend-api/codex/responses",
 			);
-			expect(requests[0].body).toMatchObject({ model: m.id, instructions: context.systemPrompt });
+			expect(requests[0].body).toMatchObject({ model: m.id, instructions: "Stable instructions" });
 			for (const key of ["previous_response_id", "max_output_tokens"]) expect(requests[0].body[key]).toBeUndefined();
 			if (api === "openai-codex-responses") {
 				expect(requests[0].body).toMatchObject({
@@ -127,9 +128,9 @@ describe("native OpenAI compaction", () => {
 				for (const key of ["tools", "reasoning", "client_metadata", "stream", "store"])
 					expect(requests[0].body[key]).toBeUndefined();
 			}
-			const replay: Context = {
-				...context,
+			const replay: TranscriptContext = normalizeContext({
 				messages: [
+					context.messages[0],
 					{
 						role: "user",
 						content: [],
@@ -137,7 +138,7 @@ describe("native OpenAI compaction", () => {
 						openaiCompaction: { ...result.compaction, fallback: context.messages },
 					},
 				],
-			};
+			});
 			const options = { apiKey, fetch, transport: "sse" as const, sessionId: "session" };
 			for (let i = 0; i < 3; i++) {
 				const stream =
