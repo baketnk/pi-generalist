@@ -24,7 +24,7 @@ Eval suites and their fixtures live under `evals/`. Image build files live in `d
 Host evals (smoke, documentation audit) and documentation-lift evals need `PI_PROVIDER` and `PI_MODEL`.
 
 ```bash
-PI_PROVIDER=openai-codex PI_MODEL=gpt-5.6-sol npm run eval -w packages/evals
+PI_PROVIDER=openai-codex PI_MODEL=gpt-6-sol npm run eval -w packages/evals
 ```
 
 That runs host evals, then the documentation comparison. Extra CLI flags after `--` go to `eval:docs` only.
@@ -32,13 +32,13 @@ That runs host evals, then the documentation comparison. Extra CLI flags after `
 Host only:
 
 ```bash
-PI_PROVIDER=openai-codex PI_MODEL=gpt-5.6-sol npm run eval:host -w packages/evals
+PI_PROVIDER=openai-codex PI_MODEL=gpt-6-sol npm run eval:host -w packages/evals
 ```
 
 One host suite:
 
 ```bash
-PI_PROVIDER=openai-codex PI_MODEL=gpt-5.6-sol \
+PI_PROVIDER=openai-codex PI_MODEL=gpt-6-sol \
   npm run eval:host -w packages/evals -- evals/documentation-audit.eval.ts
 ```
 
@@ -49,7 +49,7 @@ From the repository root:
 ```bash
 npm run eval:docs -w packages/evals -- \
   --provider openai-codex \
-  --model gpt-5.6-sol
+  --model gpt-6-sol
 ```
 
 `PI_PROVIDER` and `PI_MODEL` provide the same defaults. Both values are required.
