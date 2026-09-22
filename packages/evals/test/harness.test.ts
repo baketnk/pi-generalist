@@ -17,19 +17,19 @@ describe("resolveModelSelection", () => {
 		expect(
 			resolveModelSelection(
 				{ provider: "anthropic", id: "claude-opus-4-6" },
-				{ PI_PROVIDER: "openai-codex", PI_MODEL: "gpt-5.6-sol" },
+				{ PI_PROVIDER: "openai-codex", PI_MODEL: "gpt-6-sol" },
 			),
 		).toEqual({ provider: "anthropic", id: "claude-opus-4-6" });
 	});
 
 	it("uses trimmed environment defaults", () => {
-		expect(resolveModelSelection(undefined, { PI_PROVIDER: " openai-codex ", PI_MODEL: " gpt-5.6-sol " })).toEqual({
+		expect(resolveModelSelection(undefined, { PI_PROVIDER: " openai-codex ", PI_MODEL: " gpt-6-sol " })).toEqual({
 			provider: "openai-codex",
-			id: "gpt-5.6-sol",
+			id: "gpt-6-sol",
 		});
 	});
 
-	it.each([{}, { PI_PROVIDER: "openai-codex" }, { PI_MODEL: "gpt-5.6-sol" }])(
+	it.each([{}, { PI_PROVIDER: "openai-codex" }, { PI_MODEL: "gpt-6-sol" }])(
 		"rejects incomplete model selection",
 		(environment) => {
 			expect(() => resolveModelSelection(undefined, environment)).toThrow("Select a harness model explicitly");
