@@ -1,25 +1,13 @@
-import {
-	type AgentRequestIdentity,
-	type AssistantMessage,
-	type AssistantMessageEvent,
-	EventStream,
-	type Model,
-} from "@earendil-works/pi-ai";
+import type { AgentRequestIdentity, AssistantMessage, AssistantMessageEvent, Model } from "@earendil-works/pi-ai";
+import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { Agent } from "../src/agent.ts";
 import type { AgentTool } from "../src/types.ts";
 
-class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
+class MockAssistantStream extends AssistantMessageEventStream {
 	constructor(event: Extract<AssistantMessageEvent, { type: "done" | "error" }>) {
-		super(
-			(candidate) => candidate.type === "done" || candidate.type === "error",
-			(candidate) => {
-				if (candidate.type === "done") return candidate.message;
-				if (candidate.type === "error") return candidate.error;
-				throw new Error("Unexpected event type");
-			},
-		);
+		super();
 		queueMicrotask(() => this.push(event));
 	}
 }

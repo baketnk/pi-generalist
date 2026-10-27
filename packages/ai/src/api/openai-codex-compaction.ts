@@ -14,14 +14,7 @@ function retainUserMessages(input: JsonValue[]): JsonValue[] {
 	const retained: JsonValue[] = [];
 	for (let i = input.length - 1; i >= 0 && remaining > 0; i--) {
 		const item = input[i];
-		if (
-			!item ||
-			typeof item !== "object" ||
-			Array.isArray(item) ||
-			item.role !== "user" ||
-			(item.type !== undefined && item.type !== "message")
-		)
-			continue;
+		if (!isObject(item) || item.role !== "user" || (item.type !== undefined && item.type !== "message")) continue;
 		const message = structuredClone(item);
 		const content =
 			typeof message.content === "string" ? [{ type: "input_text", text: message.content }] : message.content;

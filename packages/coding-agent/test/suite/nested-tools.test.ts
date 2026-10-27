@@ -37,8 +37,8 @@ async function setup(
 					parameters: Type.Object({}),
 					nestedTools: options.allowed ?? ["echo", "serial", "compose"],
 					async execute(_id, _args, _signal, _update, ctx) {
-						if (!ctx.tools) throw new Error("Missing execution context");
-						return { content: [{ type: "text", text: await action(ctx.tools) }], details: {} };
+						if (!ctx.nestedTools) throw new Error("Missing execution context");
+						return { content: [{ type: "text", text: await action(ctx.nestedTools) }], details: {} };
 					},
 				});
 				options.configure?.(pi);
@@ -70,7 +70,7 @@ describe("execution-scoped nested tools", () => {
 				tools: [{ ...echo, prepareArguments: (args) => ({ value: (args as { old: number }).old }) }],
 				configure: (pi) => {
 					pi.on("tool_call", (e, ctx) => {
-						expect(ctx.tools).toBeUndefined();
+						expect(ctx.nestedTools).toBeUndefined();
 						if (e.toolName !== "echo") return;
 						expect(e.parentToolCallId).toBe("outer");
 						e.input.value = 7;

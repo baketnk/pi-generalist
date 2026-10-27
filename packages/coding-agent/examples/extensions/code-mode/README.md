@@ -183,15 +183,15 @@ pi.registerTool({
   // label, description, parameters ...
   nestedTools: ["read", "edit"],
   async execute(id, args, signal, onUpdate, ctx) {
-    if (!ctx.tools) throw new Error("Nested dispatch is unavailable");
-    const result = await ctx.tools.invoke("read", { path: "manifest.json" });
+    if (!ctx.nestedTools) throw new Error("Nested dispatch is unavailable");
+    const result = await ctx.nestedTools.invoke("read", { path: "manifest.json" });
     // The core API resolves tool errors with isError (unlike the JS bridge).
     return { content: result.content, details: {} };
   },
 });
 ```
 
-`ctx.tools` exists only inside an opted-in execute invocation, not commands or
+`ctx.nestedTools` exists only inside an opted-in execute invocation, not commands or
 hooks. Captured invokers expire when that invocation settles; invalidated extension
 runtimes reject stale use. Cancellation signals are invocation-specific in execute,
 `tool_call`, and `tool_result` hooks.

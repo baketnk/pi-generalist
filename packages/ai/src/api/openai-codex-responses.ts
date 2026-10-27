@@ -11,6 +11,7 @@ import type {
 	AgentRequestIdentity,
 	Api,
 	AssistantMessage,
+	Context,
 	JsonValue,
 	Model,
 	ProviderEnv,
@@ -719,7 +720,7 @@ function getServiceTierCostMultiplier(
 /** Remote compaction v2 uses the ordinary Responses stream with a final trigger item. */
 export async function buildCompactionRequest(
 	model: Model<"openai-codex-responses">,
-	context: TranscriptContext,
+	context: Context,
 	options: SimpleStreamOptions,
 ) {
 	if (!options.apiKey) throw new Error(`No API key for provider: ${model.provider}`);
@@ -728,9 +729,10 @@ export async function buildCompactionRequest(
 	const turnState = getCodexTurnState(options.requestIdentity, accountId, url);
 	const clamped = options.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
 	const cacheSessionId = options.cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options.sessionId);
+	const normalizedContext = resolveTranscript(normalizeContext(context), model.compat?.supportsMidConvoSystemMessages);
 	let body = buildRequestBody(
 		model,
-		context,
+		normalizedContext,
 		{ ...options, reasoningEffort: clamped === "off" ? undefined : clamped },
 		cacheSessionId,
 	);

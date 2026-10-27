@@ -168,6 +168,8 @@ Response:
   "success": true,
   "data": {
     "model": {...},
+    "cwd": "/path/to/project",
+    "compactionSettings": {"enabled": true, "reserveTokens": 16384, "keepRecentTokens": 20000},
     "thinkingLevel": "medium",
     "isStreaming": false,
     "isCompacting": false,
@@ -183,7 +185,7 @@ Response:
 }
 ```
 
-The `model` field is a full [Model](#model-object) object, or omitted when no model is selected. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set.
+The `model` field is a full [Model](#model-object) object, or omitted when no model is selected. `cwd` is the working directory recorded in the active session header. `compactionSettings` contains the resolved enabled flag and token budgets for the active model, including model-specific overrides. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set.
 
 ### get_messages
 

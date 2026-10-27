@@ -249,7 +249,7 @@ describe("Code Mode integration and provider projection", () => {
 		expect(contexts).toHaveLength(5);
 		const models = [
 			getModel("openai", "gpt-5.4"),
-			getModel("openai-codex", "gpt-5.5"),
+			getModel("openai-codex", "gpt-6-sol"),
 			getModel("anthropic", "claude-sonnet-4-5"),
 		];
 		for (const model of models) {

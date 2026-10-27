@@ -116,7 +116,10 @@ describe("Codex compaction v2", () => {
 						role: "user",
 						content: [],
 						timestamp: 5,
-						openaiCompaction: { ...first.compaction, fallback: messages },
+						openaiCompaction: {
+							...first.compaction,
+							fallback: messages.filter((message) => message.role !== "system"),
+						},
 					},
 				],
 			},

@@ -5,6 +5,7 @@ import type {
 	Api,
 	AssistantMessage,
 	CacheRetention,
+	Context,
 	Model,
 	OpenAIResponsesCompat,
 	ProviderEnv,
@@ -21,7 +22,14 @@ import { headersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
-import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
+import {
+	getCurrentSystemPrompt,
+	getDeclaredTools,
+	normalizeContext,
+	resolveTranscript,
+	resolveTranscriptTools,
+	withoutInitialSystemMessage,
+} from "../utils/transcript.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
@@ -343,15 +351,26 @@ export async function buildCompactionRequest(
 	options: SimpleStreamOptions,
 ) {
 	const apiKey = getClientApiKey(model.provider, options.apiKey, options.headers);
-	const { input } = buildParams(model, { ...context, systemPrompt: undefined }, options);
+	const resolvedContext = resolveTranscript(normalizeContext(context), false);
+	const inputContext = normalizeContext({ messages: withoutInitialSystemMessage(resolvedContext.messages) });
+	const compat = getCompat(model);
+	const grammarToolInputProperties = createGrammarToolInputProperties(
+		getDeclaredTools(resolvedContext.messages),
+		compat.supportsOpenAIGrammarTools,
+	);
+	const { input } = buildParams(model, inputContext, options, compat, grammarToolInputProperties, undefined);
 	let body: unknown = {
 		model: model.id,
 		input,
-		instructions: context.systemPrompt,
+		instructions: getCurrentSystemPrompt(resolvedContext.messages),
 		prompt_cache_key: options.cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options.sessionId),
 	};
 	body = (await options.onPayload?.(body, model)) ?? body;
-	const headers = new Headers({ "User-Agent": getPiUserAgent(), Authorization: `Bearer ${apiKey}`, ...model.headers });
+	const headers = new Headers({
+		...getIdentityHeaders(model, options.identity),
+		Authorization: `Bearer ${apiKey}`,
+		...model.headers,
+	});
 	for (const [key, value] of Object.entries(options.headers ?? {})) {
 		if (value === null) headers.delete(key);
 		else headers.set(key, value);

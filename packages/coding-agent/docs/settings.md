@@ -4,6 +4,8 @@ This reference lists user-configurable settings, their types, defaults, and purp
 
 Add `"$schema": "https://pi.dev/schemas/settings.schema.json"` to `settings.json` for editor validation and completion.
 
+When resuming with `--session`, project settings are resolved from the working directory recorded in the session header, not the launch directory. RPC [`get_state`](rpc-commands.md#get_state) exposes the effective `cwd` and model-resolved `compactionSettings`.
+
 ## Model and thinking
 
 <a id="model-cycling"></a>

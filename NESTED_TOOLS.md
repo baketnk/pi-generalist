@@ -1,8 +1,12 @@
 # Local nested-tools fork
 
-Baseline: upstream `earendil-works/pi` tag `v0.85.1`, commit
-`d981de1229ef899957bbe968bc8dcda02a21f477`. Development branch: `nested-tools`.
+Baseline: upstream `earendil-works/pi` commit
+`842c73170` (2026-10-27, after v1.4.0). Development branch: `nested-tools`.
 The installed Pi is not replaced. This is a local prototype, not a published release.
+
+Upstream's built-in sandboxed `codemode` and MCP integration coexist with this
+fork's trusted Node `exec` tool. Opted-in tools receive the fork's scoped invoker
+as `ctx.nestedTools`; `ctx.tools` retains upstream's tool-definition list.
 
 ## Entry point
 
@@ -30,11 +34,10 @@ npm run check
 ```
 
 The offline build requires generated model catalog data in
-`packages/ai/src/providers/data`. This local checkout uses a copied, matching
-v0.85.1 installed catalog and passes `packages/ai/scripts/check-model-data.ts`.
-That generated catalog and all build products remain ignored, not source changes.
-A future clean checkout must provision compatible data or deliberately use
-upstream's online generation workflow; `build:offline` does not fetch missing data.
+`packages/ai/src/providers/data`. Provision it with `npm run hydrate:model-data`
+(which fetches public catalogs), then validate with `npm run check:model-data`.
+The generated data and build products remain ignored, not source changes.
+`build:offline` does not fetch missing data.
 
 ## Layout
 

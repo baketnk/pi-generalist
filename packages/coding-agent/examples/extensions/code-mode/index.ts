@@ -47,9 +47,9 @@ export default function codeMode(pi: ExtensionAPI) {
 		}),
 		nestedTools: names,
 		async execute(id, args, signal, onUpdate, ctx) {
-			if (!ctx.tools)
+			if (!ctx.nestedTools)
 				throw new Error("Code Mode requires the nested-tools Pi fork; no unsafe fallback is available");
-			const invoker = ctx.tools;
+			const invoker = ctx.nestedTools;
 			const toolCalls: CellToolCall[] = [];
 			const details = (): ExecDetails => ({
 				calls: toolCalls.length,
