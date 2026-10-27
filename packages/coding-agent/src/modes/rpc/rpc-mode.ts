@@ -447,6 +447,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 			case "get_state": {
 				const state: RpcSessionState = {
+					cwd: session.sessionManager.getCwd(),
+					compactionSettings: session.settingsManager.getCompactionSettings(session.model),
 					model: session.model,
 					thinkingLevel: session.thinkingLevel,
 					isStreaming: session.isStreaming,

@@ -1,6 +1,13 @@
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { type Api, type Context, fauxAssistantMessage, fauxToolCall, type Model } from "@earendil-works/pi-ai";
+import { readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import {
+	type Api,
+	fauxAssistantMessage,
+	fauxToolCall,
+	type Model,
+	normalizeContext,
+	type TranscriptContext,
+} from "@earendil-works/pi-ai";
 import { getModel, streamSimple } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it } from "vitest";
 import codeMode from "../examples/extensions/code-mode/index.ts";
@@ -10,13 +17,15 @@ import { SessionManager } from "../src/core/session-manager.ts";
 import { createHarness, getMessageText, type Harness } from "./suite/harness.ts";
 
 const harnesses: Harness[] = [];
-afterEach(() => {
+const spillDirectories: string[] = [];
+afterEach(async () => {
 	for (const h of harnesses.splice(0)) h.cleanup();
+	for (const path of spillDirectories.splice(0)) await rm(path, { recursive: true, force: true });
 });
 
 // Exercise real provider serializers, but throw at onPayload BEFORE transport.
 // Keys and URLs are synthetic; no credential discovery or model request occurs.
-async function project(model: Model<Api>, context: Context): Promise<Record<string, unknown>> {
+async function project(model: Model<Api>, context: TranscriptContext): Promise<Record<string, unknown>> {
 	let payload: Record<string, unknown> | undefined;
 	const stream = streamSimple({ ...model, baseUrl: "http://127.0.0.1:9" }, context, {
 		apiKey:
@@ -40,14 +49,10 @@ async function runFixture() {
 	await writeFile(join(h.tempDir, "manifest.json"), JSON.stringify({ files: ["one.txt", "two.txt"] }));
 	await writeFile(join(h.tempDir, "one.txt"), "old\n");
 	await writeFile(join(h.tempDir, "two.txt"), "other\n");
-	const contexts: Context[] = [];
+	const contexts: TranscriptContext[] = [];
 	const original = h.session.agent.streamFunction;
 	h.session.agent.streamFunction = (model, context, options) => {
-		contexts.push({
-			systemPrompt: context.systemPrompt,
-			messages: structuredClone(context.messages),
-			tools: context.tools?.map(({ name, description, parameters }) => ({ name, description, parameters })),
-		});
+		contexts.push(normalizeContext({ messages: structuredClone(context.messages) }));
 		return original(model, context, options);
 	};
 	h.setResponses([
@@ -75,6 +80,46 @@ async function runFixture() {
 }
 
 describe("Code Mode integration and provider projection", () => {
+	it.each([false, true])(
+		"retains spill paths and host summaries through the result pipeline and reload (failure=%s)",
+		async (fail) => {
+			const h = await createHarness({
+				extensionFactories: [codeMode],
+				settings: { compaction: { enabled: false } },
+			});
+			harnesses.push(h);
+			h.setResponses([
+				fauxAssistantMessage(
+					[
+						fauxToolCall("exec", {
+							code: `text('START' + 'x'.repeat(60000) + 'END'); await tools.read({path: ${JSON.stringify(fail ? "missing-fixture" : "source.txt")}});`,
+						}),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("done"),
+			]);
+			await writeFile(join(h.tempDir, "source.txt"), "ok");
+			await h.session.prompt("Exercise large output");
+			const result = h.session.messages.find((m) => m.role === "toolResult");
+			expect(result).toMatchObject({ isError: fail });
+			const text = getMessageText(result);
+			const match = text.match(/Captured output saved to: ("(?:[^"\\]|\\.)*")/);
+			expect(match).not.toBeNull();
+			const path = JSON.parse(match![1]) as string;
+			spillDirectories.push(dirname(path));
+			expect(text).toContain("START");
+			expect(text).toContain("END");
+			expect(text).toContain(`1 completed, ${fail ? 1 : 0} failed`);
+			if (fail) expect(text).toContain("ENOENT");
+			expect(Buffer.byteLength(text)).toBeLessThan(50 * 1024);
+			const restored = SessionManager.open(h.session.exportToJsonl(join(h.tempDir, "spill.jsonl")));
+			expect(restored.buildSessionContext().messages.find((m) => m.role === "toolResult")).toEqual(result);
+			await h.session.reload();
+			expect(await readFile(path, "utf8")).toBe(`START${"x".repeat(60000)}END\n`);
+		},
+	);
+
 	it("retains failed call details and compiler diagnostics through the normal error pipeline and reopen", async () => {
 		const h = await createHarness({ extensionFactories: [codeMode], settings: { compaction: { enabled: false } } });
 		harnesses.push(h);

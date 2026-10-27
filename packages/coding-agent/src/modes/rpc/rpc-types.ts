@@ -94,6 +94,10 @@ export interface RpcSlashCommand {
 // ============================================================================
 
 export interface RpcSessionState {
+	/** Effective working directory from the active session header. */
+	cwd: string;
+	/** Effective compaction settings resolved for the active model. */
+	compactionSettings: { enabled: boolean; reserveTokens: number; keepRecentTokens: number };
 	model?: Model<any>;
 	thinkingLevel: ThinkingLevel;
 	isStreaming: boolean;

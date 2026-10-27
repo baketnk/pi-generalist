@@ -2,9 +2,10 @@ import { spawn } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import type { NestedToolInvoker } from "@earendil-works/pi-agent-core";
+import type { JsonObject, JsonValue } from "@earendil-works/pi-ai";
+import { CellOutput } from "./output.ts";
 
 export const CODE_MAX_BYTES = 64 * 1024;
-export const OUTPUT_MAX_BYTES = 50 * 1024;
 const FRAME_MAX_BYTES = 1024 * 1024;
 const RESULTS_MAX_BYTES = 4 * 1024 * 1024;
 const REQUEST_MAX_BYTES = 256 * 1024;
@@ -21,6 +22,7 @@ export interface CellOptions {
 
 export interface CellResult {
 	output: string;
+	outputPath?: string;
 	error?: string;
 	calls: number;
 }
@@ -51,9 +53,7 @@ export async function runCell(options: CellOptions): Promise<CellResult> {
 	const requestIds = new Set<number>();
 	let finished = false;
 	let error: string | undefined;
-	let output = "";
-	let outputBytes = 0;
-	let outputLines = 0;
+	const output = new CellOutput();
 	let resultBytes = 0;
 	let calls = 0;
 	let buffer = "";
@@ -84,19 +84,11 @@ export async function runCell(options: CellOptions): Promise<CellResult> {
 
 	function append(text: string) {
 		if (finished) return;
-		const bytes = Buffer.byteLength(text);
-		const lines = text.split("\n").length - 1;
-		if (outputLines + lines > 2000) {
-			stop("Cell output exceeds 2000 lines; output is incomplete");
-			return;
+		if (!output.append(text)) {
+			stop(
+				"Cell output exceeds 16 MiB capture limit; output is incomplete, child-tool cancellation requested, effects may be partial",
+			);
 		}
-		if (outputBytes + bytes > OUTPUT_MAX_BYTES) {
-			stop("Cell output exceeds 50 KiB; output is incomplete");
-			return;
-		}
-		outputBytes += bytes;
-		outputLines += lines;
-		output += text;
 	}
 
 	function send(message: unknown) {
@@ -109,7 +101,11 @@ export async function runCell(options: CellOptions): Promise<CellResult> {
 		outgoing.write(`${line}\n`);
 	}
 
-	async function handleCall(message: Record<string, unknown>) {
+	function isJsonObject(value: JsonValue): value is JsonObject {
+		return value !== null && typeof value === "object" && !Array.isArray(value);
+	}
+
+	async function handleCall(message: JsonObject) {
 		const { id, name, args } = message;
 		if (
 			typeof id !== "number" ||
@@ -118,9 +114,8 @@ export async function runCell(options: CellOptions): Promise<CellResult> {
 			requestIds.has(id) ||
 			typeof name !== "string" ||
 			!options.tools.includes(name) ||
-			!args ||
-			typeof args !== "object" ||
-			Array.isArray(args)
+			args === undefined ||
+			!isJsonObject(args)
 		) {
 			stop("Invalid or unavailable nested tool request");
 			return;
@@ -131,12 +126,12 @@ export async function runCell(options: CellOptions): Promise<CellResult> {
 			return;
 		}
 		if (Buffer.byteLength(JSON.stringify(args)) > REQUEST_MAX_BYTES) {
-			stop("Nested arguments exceed 256 KiB");
+			stop("Nested arguments exceed 256 KiB for this call (per-call limit; split the arguments across calls)");
 			return;
 		}
 		options.onProgress?.(`Nested call ${calls}: ${name}`);
 		try {
-			const result = await options.invoke(name, args as Record<string, unknown>, { signal: controller.signal });
+			const result = await options.invoke(name, args, { signal: controller.signal });
 			if (finished) return;
 			// Do not transport image payloads into this text-only MVP or silently erase them.
 			if (result.content.some((block) => block.type !== "text")) {
@@ -179,12 +174,12 @@ export async function runCell(options: CellOptions): Promise<CellResult> {
 			stop("Worker frame exceeds 1 MiB");
 			return;
 		}
-		const message: unknown = JSON.parse(line);
-		if (!message || typeof message !== "object" || !("type" in message)) {
+		const message = JSON.parse(line) as JsonValue;
+		if (!isJsonObject(message) || !("type" in message)) {
 			stop("Malformed worker frame");
 			return;
 		}
-		const value = message as Record<string, unknown>;
+		const value = message;
 		switch (value.type) {
 			case "text":
 				if (typeof value.text !== "string") {
@@ -260,7 +255,13 @@ export async function runCell(options: CellOptions): Promise<CellResult> {
 		// A host extension that ignores AbortSignal can delay settlement. Do not
 		// claim it stopped or allow an unknown mutation to escape this turn.
 		await Promise.allSettled([...requests]);
-		return { output, error, calls };
+		const captured = await output.finish();
+		return {
+			output: captured.output,
+			outputPath: captured.outputPath,
+			error: [error, captured.error].filter(Boolean).join("\n") || undefined,
+			calls,
+		};
 	} finally {
 		clearTimeout(timer);
 		options.signal?.removeEventListener("abort", onAbort);

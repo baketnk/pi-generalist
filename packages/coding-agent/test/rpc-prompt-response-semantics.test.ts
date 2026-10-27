@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
@@ -118,7 +118,18 @@ async function createRuntimeHost(options: {
 		},
 	});
 
-	const sessionManager = SessionManager.inMemory();
+	const sessionManager = SessionManager.inMemory(tempDir);
+	mkdirSync(join(tempDir, ".pi"), { recursive: true });
+	writeFileSync(
+		join(tempDir, ".pi", "settings.json"),
+		JSON.stringify({
+			compaction: {
+				reserveTokens: 1234,
+				keepRecentTokens: 5678,
+				modelOverrides: { "anthropic/claude-sonnet-4-5": { reserveTokens: 2345 } },
+			},
+		}),
+	);
 	const settingsManager = SettingsManager.create(tempDir, tempDir);
 	const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 	const modelRegistry = await createInMemoryModelRegistry(authStorage);
@@ -178,6 +189,26 @@ describe("RPC prompt response semantics", () => {
 	afterEach(() => {
 		rpcIo.outputLines = [];
 		rpcIo.lineHandler = undefined;
+	});
+
+	it("get_state reports effective cwd and model-specific compaction budgets", async () => {
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: false, responseDelayMs: 0 });
+
+		try {
+			lineHandler(JSON.stringify({ id: "state", type: "get_state" }));
+			await vi.waitFor(() => {
+				const response = parseOutputLines(rpcIo.outputLines).find((record) => record.id === "state");
+				expect(response).toMatchObject({
+					success: true,
+					data: {
+						cwd: expect.stringContaining("pi-rpc-prompt-"),
+						compactionSettings: { enabled: true, reserveTokens: 2345, keepRecentTokens: 5678 },
+					},
+				});
+			});
+		} finally {
+			await cleanup();
+		}
 	});
 
 	it("emits one failure response when prompt preflight rejects", async () => {

@@ -71,8 +71,9 @@ rather than JSON argument/result blobs. These summaries use observed child
 requests and results, not guesses from JavaScript. Caught child failures remain
 visible even when the cell itself completes. Expand the row with the normal
 tool-output toggle to inspect the requested, syntax-highlighted JavaScript and
-selected output. Explicitly script-printed output is preserved as-is, including
-JSON if that is what the script printed. Error previews stay visible collapsed.
+selected output. Small script-printed output is preserved as-is, including
+JSON if that is what the script printed. Large output uses the head/tail preview
+and capture file described below. Error previews stay visible collapsed.
 
 Restored nested trace rows use recorded effective arguments and show saved edit
 diffs or bounded text output when expanded, not raw JSON metadata. They never
@@ -96,9 +97,13 @@ read cannot bury a subsequent compiler error in the collapsed preview.
 - Fresh process per cell, no persistent variables, timers, store/load, or resumable cells.
 - 64 KiB UTF-8 source; 60-second default deadline, user/model-selectable up to 300 seconds.
 - At most 32 nested requests and 4 simultaneous child dispatches.
-- 256 KiB serialized arguments per bridge request; 1 MiB maximum protocol frame;
-  4 MiB aggregate serialized results sent to the worker.
-- Printed/stdout/stderr output: 50 KiB or 2,000 newlines, plus bounded error/host diagnostics.
+- 256 KiB serialized arguments **per nested call** (not an aggregate cell limit);
+  oversized single calls fail with guidance to split the arguments across calls.
+  The limit measures the JSON-serialized argument object. The 1 MiB maximum protocol
+  frame and 4 MiB aggregate serialized results sent to the worker are separate limits.
+- Printed/stdout/stderr output: 50 KiB or 2,000 newlines before switching to a
+  head/tail preview and private temporary capture file; 16 MiB hard capture ceiling.
+  Error/host diagnostics are separately bounded and never truncated by this preview.
 - Node `--max-old-space-size=256`. This is a V8 heap limit, **not a hard total-RSS limit**.
 - One nested level; orchestrators cannot call themselves or another orchestrator.
 - Every opted-in orchestrator is sequential against direct sibling tools. Inside
@@ -116,6 +121,40 @@ read cannot bury a subsequent compiler error in the collapsed preview.
 cells do not outlive their outer tool invocation. A trusted script can deliberately
 escape these conventions using host APIs or detached processes; this version does
 not defend against that.
+
+## Large output capture
+
+Crossing 50 KiB or 2,000 newlines no longer stops a cell. The response instead
+shows the head and tail (each at most 20 KiB/900 newlines), an explicit omitted-middle
+marker, the captured byte/newline counts, and an absolute path to `output.txt` in
+a unique `pi-exec-*` OS-temp directory. The notice has reserved space outside the
+excerpts. Use `read` with `offset`/`limit`, or `bash` with `rg`, to inspect the file.
+The nested-call execution summary and error diagnostics remain outside the preview.
+
+Captured content and file size are limited to **16 MiB per cell**. The host buffers
+bounded chunks in memory, with an additional bounded copy during finalization.
+Exceeding the ceiling stops the cell and requests child cancellation; the response
+explicitly labels the saved UTF-8 prefix as a partial capture, not a complete result.
+Successful or partial side effects are not rolled back. The existing 1 MiB bridge
+frame limit still applies to each `text()` message; print larger strings in chunks.
+
+Files are created by the host after cell settlement, with exclusive creation and
+0600 permissions inside a private 0700 directory on POSIX. Small responses create
+no file. A creation/write failure reports an error and still returns bounded
+head/tail excerpts; it never claims the missing file is available. Captures also
+survive script errors, deadlines, and cancellation once received by the host.
+
+Files are **not deleted on cell exit, session shutdown, or reload**. They remain
+until OS temp cleanup or explicit manual removal; they are not durable session
+attachments and can be absent on resume elsewhere. There is no aggregate cross-cell
+disk quota; each file is capped, but retained files accumulate. Treat them as
+potentially sensitive local tool output.
+
+The file contains composed text received by the host: `text()` rendering plus
+captured stdout/stderr with their stream labels, in arrival order. It does not
+recover child-tool truncation, `text(object)` inspection limits, unprinted results,
+or bytes lost before delivery on failure. A failed cell's file contains output
+captured before termination, not hypothetical output from unfinished work.
 
 ## What is and is not sandboxed
 
