@@ -5,6 +5,5 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Set PI_CODING_AGENT_DIR explicitly to use an isolated or alternate profile.
 export PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 export PI_SKIP_VERSION_CHECK=1
-exec "$ROOT/node_modules/.bin/tsx" --tsconfig "$ROOT/tsconfig.json" \
-  "$ROOT/packages/coding-agent/src/cli.ts" \
+exec "$ROOT/pi-test.sh" \
   --extension "$ROOT/packages/coding-agent/examples/extensions/code-mode/index.ts" "$@"
