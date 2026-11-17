@@ -121,10 +121,6 @@ async function executeToolCallsSequential(
 		await emitToolResultMessage(toolResultMessage, emit);
 		finalizedCalls.push(finalized);
 		messages.push(toolResultMessage);
-
-		if (signal?.aborted) {
-			break;
-		}
 	}
 
 	return {
@@ -160,9 +156,6 @@ async function executeToolCallsParallel(
 			} satisfies FinalizedToolCallOutcome;
 			await emitToolExecutionEnd(finalized, emit);
 			finalizedCalls.push(finalized);
-			if (signal?.aborted) {
-				break;
-			}
 			continue;
 		}
 
@@ -192,9 +185,6 @@ async function executeToolCallsParallel(
 			await emitToolExecutionEnd(finalized, emit);
 			return finalized;
 		});
-		if (signal?.aborted) {
-			break;
-		}
 	}
 
 	const orderedFinalizedCalls = await Promise.all(
@@ -288,6 +278,10 @@ async function prepareToolCall(
 	signal: AbortSignal | undefined,
 	tools: readonly AgentTool<any>[] = currentContext.tools ?? [],
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
+	// Aborted batches still need a result for every tool call (#9986).
+	if (signal?.aborted) {
+		return { kind: "immediate", result: createErrorToolResult("Operation aborted"), isError: true };
+	}
 	const tool = tools.find((t) => t.name === toolCall.name);
 	if (!tool) {
 		return {
@@ -554,8 +548,6 @@ async function dispatchNestedToolCall(
 			args: toolCall.arguments,
 			parentToolCallId: toolCall.parentToolCallId,
 		});
-		if (signal.aborted)
-			return { kind: "immediate" as const, result: createErrorToolResult("Operation aborted"), isError: true };
 		return prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
 	});
 	const finalized: FinalizedToolCallOutcome =

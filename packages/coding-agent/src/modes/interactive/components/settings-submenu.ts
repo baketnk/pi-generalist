@@ -123,6 +123,8 @@ export class SelectSubmenu extends Container {
 			const isNav =
 				kb.matches(data, "tui.select.up") ||
 				kb.matches(data, "tui.select.down") ||
+				kb.matches(data, "tui.select.pageUp") ||
+				kb.matches(data, "tui.select.pageDown") ||
 				kb.matches(data, "tui.select.confirm") ||
 				kb.matches(data, "tui.select.cancel");
 			if (isNav) {
@@ -244,7 +246,7 @@ export class SteppedSubmenu extends Container {
 		);
 	}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		return this.activeComponent.render(width);
 	}
 

@@ -1,24 +1,24 @@
 // The Session's document cache is bounded by use: unattached documents leave it after the retention period and load
 // from Storage again; documents with a watch or a document state never leave it.
-import type { Context } from "@earendil-works/chord";
-import { fauxAssistantMessage, fauxText, fauxToolCall, Type } from "@earendil-works/pi-ai";
+
+import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import {
-	type AgentEvent,
 	type ConversationId,
 	defineDoc,
 	defineDocFamily,
 	defineTool,
 	type HarnessSettings,
+	type LiveState,
 	MemoryStorage,
-	type Seq,
 	type StorageWrite,
-	watchEvents,
 } from "@earendil-works/pi-durable";
+import { obj } from "@earendil-works/pi-schema";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { SessionImpl, setDefaultDocumentRetention } from "../src/session/session.ts";
 import { chatSetup, openChat } from "./chat-support.ts";
 import { addTool } from "./harness-support.ts";
-import { ControlledStorage, context, createConversation } from "./session-support.ts";
+import { viewHistory } from "./live-support.ts";
+import { ControlledStorage, context, createConversation, onValue } from "./session-support.ts";
 import { deferred, eventually } from "./task-support.ts";
 
 type Counter = { count: number };
@@ -155,9 +155,11 @@ describe("document cache retention", () => {
 		const kept = (await session.watchDoc(CounterDoc, conversationId, context))!;
 		kept.start(async () => {});
 		const seen: number[] = [];
-		watch.start(async ({ value }) => {
-			seen.push(value.count);
-		});
+		watch.start(
+			onValue(async ({ value }) => {
+				seen.push(value.count);
+			}),
+		);
 		clock.now += 1_000_000;
 		await bump(session, conversationId);
 		await settleLine(session);
@@ -216,9 +218,9 @@ describe("document cache retention", () => {
 		const conversationId = await createConversation(session);
 		const writes: StorageWrite[][] = [];
 		const commit = storage.commit.bind(storage);
-		storage.commit = (batch: readonly StorageWrite[], adopt: (seq: Seq) => void, commitContext: Context) => {
-			writes.push([...batch]);
-			return commit(batch, adopt, commitContext);
+		storage.commit = (batches, receive, commitContext) => {
+			for (const batch of batches) writes.push([...batch]);
+			return commit(batches, receive, commitContext);
 		};
 		for (let n = 0; n < 5; n++) {
 			await bump(session, conversationId);
@@ -509,7 +511,7 @@ describe("document cache retention", () => {
 		await harness.close(context);
 	});
 
-	it("gives the same events with documents evicted right after use as with documents kept", async () => {
+	it("gives the same views with documents evicted right after use as with documents kept", async () => {
 		const run = async (documentRetentionMs: number): Promise<string[]> => {
 			const setup = chatSetup();
 			setup.settings.documentRetentionMs = documentRetentionMs;
@@ -519,7 +521,7 @@ describe("document cache retention", () => {
 				defineTool({
 					name: "steps",
 					description: "Streams three steps",
-					parameters: Type.Object({}),
+					parameters: obj({}),
 					execute: async (_args, api) => {
 						for (const step of ["a\n", "b\n", "c\n"]) {
 							api.output(step);
@@ -534,19 +536,18 @@ describe("document cache retention", () => {
 				fauxAssistantMessage([fauxText("done")]),
 			]);
 			const { harness, root } = await openChat(new MemoryStorage(), setup);
-			const stream = await watchEvents(harness, root.id, context);
-			const events: AgentEvent[] = [];
-			stream.start(async ({ value: batch }) => {
-				events.push(...batch);
-			});
+			const history = await viewHistory(harness, root.id);
 			await (await root.submit({ type: "input", content: "go" }, context)).wait(context);
 			await harness.waitForIdle(context);
-			await stream.stop();
+			history.detach();
 			await harness.close(context);
-			// Ids and times differ between runs; the sequence of event types and tool outputs must not.
-			return events.map((event) =>
-				event.type === "tool_execution_update" ? `update:${JSON.stringify(event.output)}` : event.type,
-			);
+			// Ids and times differ between runs; the sequence of entries, run states, and tool outputs must not.
+			return history.views.map((view) => {
+				const live = (view.docs["pi.live"] ?? {}) as LiveState;
+				const tools = (live.tools ?? []).map((slot) => `${slot.callId}:${slot.status}:${slot.output ?? ""}`);
+				const kinds = view.entries.map((entry) => entry.kind).join(",");
+				return `${kinds} run:${live.run !== undefined} generation:${live.generation !== undefined} ${tools.join(" ")}`;
+			});
 		};
 		expect(await run(0)).toEqual(await run(600_000));
 	});

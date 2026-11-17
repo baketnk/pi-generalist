@@ -85,7 +85,7 @@ describe("native compaction session lifecycle", () => {
 					expect(String(url)).toBe("https://chatgpt.com/backend-api/codex/responses");
 					const body = JSON.parse(String(init?.body));
 					expect(body.input).toEqual([...before, { type: "compaction_trigger" }]);
-					expect(body.instructions).toContain("You are an expert coding assistant");
+					expect(body.instructions).toBe(harness.session.systemPrompt);
 					expect(JSON.stringify(body)).not.toContain("TRANSIENT_REVOKABLE_PACKET");
 					return new Response(
 						[

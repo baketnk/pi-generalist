@@ -167,7 +167,7 @@ describe("Code Mode integration and provider projection", () => {
 		});
 	});
 
-	it("settles an active cell and its Bash child before reload replaces runtime state", async () => {
+	it("requires an active cell and its Bash child to settle before reload replaces runtime state", async () => {
 		const h = await createHarness({ extensionFactories: [codeMode], settings: { compaction: { enabled: false } } });
 		harnesses.push(h);
 		let notify: () => void = () => {};
@@ -191,8 +191,10 @@ describe("Code Mode integration and provider projection", () => {
 		]);
 		const running = h.session.prompt("Run a cancellable cell");
 		await started;
-		await h.session.reload();
+		await expect(h.session.reload()).rejects.toThrow("Wait for the current response to finish before reloading.");
+		await h.session.abort();
 		await running;
+		await h.session.reload();
 		expect(h.session.isStreaming).toBe(false);
 		expect(
 			h

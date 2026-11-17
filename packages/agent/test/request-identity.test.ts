@@ -1,15 +1,19 @@
-import type { AgentRequestIdentity, AssistantMessage, AssistantMessageEvent, Model } from "@earendil-works/pi-ai";
-import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
+import {
+	type AgentRequestIdentity,
+	type AssistantMessage,
+	type AssistantMessageEvent,
+	createAssistantMessageEventStream,
+	type Model,
+} from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { Agent } from "../src/agent.ts";
 import type { AgentTool } from "../src/types.ts";
 
-class MockAssistantStream extends AssistantMessageEventStream {
-	constructor(event: Extract<AssistantMessageEvent, { type: "done" | "error" }>) {
-		super();
-		queueMicrotask(() => this.push(event));
-	}
+function mockAssistantStream(event: Extract<AssistantMessageEvent, { type: "done" | "error" }>) {
+	const stream = createAssistantMessageEventStream();
+	queueMicrotask(() => stream.push(event));
+	return stream;
 }
 
 const model: Model<"openai-responses"> = {
@@ -73,13 +77,13 @@ describe("Agent request identity", () => {
 				identities.push(options?.requestIdentity as AgentRequestIdentity);
 				if (request++ === 0) {
 					const message = assistant([{ type: "toolCall", id: "tool-1", name: "steer", arguments: {} }], "toolUse");
-					return new MockAssistantStream({ type: "done", reason: "toolUse", message });
+					return mockAssistantStream({ type: "done", reason: "toolUse", message });
 				}
 				if (request === 2) {
 					agent.followUp({ role: "user", content: "follow up", timestamp: Date.now() });
 				}
 				const message = assistant([{ type: "text", text: "done" }]);
-				return new MockAssistantStream({ type: "done", reason: "stop", message });
+				return mockAssistantStream({ type: "done", reason: "stop", message });
 			},
 		});
 
@@ -106,10 +110,10 @@ describe("Agent request identity", () => {
 				identities.push(options?.requestIdentity as AgentRequestIdentity);
 				if (request++ === 0) {
 					const error = assistant([], "error", "retryable");
-					return new MockAssistantStream({ type: "error", reason: "error", error });
+					return mockAssistantStream({ type: "error", reason: "error", error });
 				}
 				const message = assistant([{ type: "text", text: "done" }]);
-				return new MockAssistantStream({ type: "done", reason: "stop", message });
+				return mockAssistantStream({ type: "done", reason: "stop", message });
 			},
 		});
 

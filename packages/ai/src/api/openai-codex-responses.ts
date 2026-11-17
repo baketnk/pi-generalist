@@ -255,11 +255,15 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 			reject(new Error("Request was aborted"));
 			return;
 		}
-		const timeout = setTimeout(resolve, ms);
-		signal?.addEventListener("abort", () => {
+		const onAbort = () => {
 			clearTimeout(timeout);
 			reject(new Error("Request was aborted"));
-		});
+		};
+		const timeout = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		signal?.addEventListener("abort", onAbort, { once: true });
 	});
 }
 
@@ -1030,7 +1034,9 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 
 const OPENAI_BETA_RESPONSES_WEBSOCKETS = "responses_websockets=2026-02-06";
 const SESSION_WEBSOCKET_CACHE_TTL_MS = 5 * 60 * 1000;
-const SESSION_WEBSOCKET_MAX_AGE_MS = 55 * 60 * 1000;
+// The server closes a socket after 60 minutes, even mid-response, and the in-flight response is lost.
+// New requests open a fresh socket after 45 minutes, leaving 15 minutes for long responses.
+const SESSION_WEBSOCKET_MAX_AGE_MS = 45 * 60 * 1000;
 
 type WebSocketEventType = "open" | "message" | "error" | "close";
 type WebSocketListener = (event: unknown) => void;

@@ -1,7 +1,16 @@
-import { type Context, type JsonValue, Watch, type WatchChange, type WatchHandle } from "@earendil-works/chord";
-import { BACKGROUND_CONTEXT, withoutAbortSignal } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, type Context, withoutAbortSignal } from "@earendil-works/chord/context";
 import { applyImmutable, type Op } from "@earendil-works/chord/delta";
-import { contained, guardObserver, type ObservedCommit, observation, type SessionImpl } from "../session/session.ts";
+import type { JsonValue } from "@earendil-works/chord/json";
+import { Watch, type WatchCall, type WatchHandle } from "@earendil-works/chord/watch";
+import {
+	closeEndOf,
+	closeEnds,
+	contained,
+	guardObserver,
+	type ObservedCommit,
+	observation,
+	type SessionImpl,
+} from "../session/session.ts";
 import type {
 	ConversationId,
 	JoinPolicy,
@@ -15,7 +24,7 @@ import type {
 import { type BlockedReason, type BlockedSubject, blockedSubject } from "./scheduler.ts";
 import { closedError, scanAll } from "./util.ts";
 
-/** A live task's durable status without its checkpoint and outcome payloads (spec §9.5). */
+/** A live task's durable status without its checkpoint and outcome payloads (spec §9.4). */
 export type TaskGraphState =
 	| { readonly status: "pending" | "running"; readonly phase: string }
 	| {
@@ -24,8 +33,13 @@ export type TaskGraphState =
 			readonly on: readonly TaskId[];
 			readonly policy: JoinPolicy;
 	  }
-	/** Asleep until the Harness clock reaches `until`. */
-	| { readonly status: "sleeping"; readonly phase: string; readonly until: number }
+	/** Asleep until the Harness clock reaches `until`, or one of `signals` holds a value no wake used. */
+	| {
+			readonly status: "sleeping";
+			readonly phase: string;
+			readonly until?: number;
+			readonly signals?: readonly { readonly signal: string; readonly key: string }[];
+	  }
 	/** Outcome held until its ordinary owned work drains. */
 	| { readonly status: "completing"; readonly outcome: TaskOutcome<JsonValue>["status"] };
 
@@ -40,14 +54,14 @@ export type TaskGraphNode = {
 	readonly state: TaskGraphState;
 	/**
 	 * Why it cannot run here, when it cannot: no registered definition takes it (`missing_task`, `task_too_old`,
-	 * `migration_failed`), or the restart limit parked it (`restart_limit`). Follows registry changes.
+	 * `migration_failed`). Follows registry changes.
 	 */
 	readonly blocked?: BlockedReason;
 	/** Conversations this task owns, in ID order. */
 	readonly conversations: readonly ConversationId[];
 };
 
-/** Every live task of the Session (spec §9.5). */
+/** Every live task of the Session (spec §9.4). */
 export type TaskGraph = {
 	/** Every live task, keyed by its decimal ID. */
 	readonly tasks: Readonly<Record<string, TaskGraphNode>>;
@@ -79,16 +93,14 @@ const SCAN_PAGE_SIZE = 256;
  */
 export class TaskGraphView {
 	readonly #session: SessionImpl;
-	readonly #storage: Storage;
 	readonly #blocking: TaskGraphBlocking;
 	#mount: Mount | undefined;
 	#closed = false;
 
-	constructor(session: SessionImpl, storage: Storage, blocking: TaskGraphBlocking) {
+	constructor(session: SessionImpl, blocking: TaskGraphBlocking) {
 		this.#session = session;
-		this.#storage = storage;
 		this.#blocking = blocking;
-		session.observeCommits((publication, context) => {
+		session.followCommits((publication, context) => {
 			// A commit held in memory changes documents only, which the graph does not show.
 			if (this.#mount === undefined || publication.kind === "memory") return;
 			advance(this.#mount, publication, context, blocking.blocked, (error) => session.report(error));
@@ -96,9 +108,10 @@ export class TaskGraphView {
 		blocking.subscribeBlocked(() => this.#refreshBlocked());
 		session.subscribeClose(() => {
 			this.#closed = true;
+			const ends = closeEnds(this.#session.failure);
 			for (const observer of [...(this.#mount?.observers ?? [])]) {
 				contained(
-					() => observer.end(this.#session.failure),
+					() => observer.end(closeEndOf(observer, ends)),
 					(error) => session.report(error),
 				);
 			}
@@ -124,7 +137,7 @@ export class TaskGraphView {
 		return observation(value, attached.observer);
 	}
 
-	/** A serialized watch of the graph, an observer of its mount; cancelling `context` stops it. */
+	/** A serialized watch of the graph, an observer of its mount; aborting `context` ends it `aborted`. */
 	async watch(context: Context): Promise<TaskGraphWatch> {
 		const { observer } = await this.#attach(
 			(value, release) => new Watch<TaskGraph>(value, release, (error) => this.#session.report(error)),
@@ -132,10 +145,10 @@ export class TaskGraphView {
 		);
 		const signal = context.abortSignal;
 		if (signal?.aborted) {
-			observer.cancel();
+			observer.abort();
 			throw signal.reason;
 		}
-		if (signal !== undefined) observer.observeCancellation(signal);
+		if (signal !== undefined) observer.observeAbort(signal);
 		return observer;
 	}
 
@@ -144,8 +157,11 @@ export class TaskGraphView {
 		create: (value: TaskGraph, release: () => void) => O,
 		context: Context,
 	): Promise<{ observer: O; detach: () => void }> {
-		return this.#session.readOnLine(async () => {
-			const mount = this.#mount ?? { ...(await this.#build(context)), observers: new Set<Observer<TaskGraph>>() };
+		return this.#session.readOnLine(async (storage) => {
+			const mount = this.#mount ?? {
+				...(await this.#build(storage, context)),
+				observers: new Set<Observer<TaskGraph>>(),
+			};
 			const detach = (): void => {
 				mount.observers.delete(observer);
 				if (mount.observers.size === 0 && this.#mount === mount) this.#mount = undefined;
@@ -181,19 +197,18 @@ export class TaskGraphView {
 			.catch(() => {});
 	}
 
-	async #build(context: Context): Promise<Omit<Mount, "observers">> {
+	/** Read the graph on the line, through the line's `storage`. */
+	async #build(storage: Storage, context: Context): Promise<Omit<Mount, "observers">> {
 		const tasks: Record<string, TaskGraphNode> = {};
 		const live = new Map<string, BlockedSubject>();
 		const records: AnyTaskRecord[] = [];
 		for (const status of LIVE_STATUSES) {
-			records.push(
-				...(await scanAll((cursor) => this.#storage.scanTasks({ status }, SCAN_PAGE_SIZE, cursor, context))),
-			);
+			records.push(...(await scanAll((cursor) => storage.scanTasks({ status }, SCAN_PAGE_SIZE, cursor, context))));
 		}
 		records.sort((a, b) => a.id - b.id);
 		for (const record of records) {
 			const owned = await scanAll((cursor) =>
-				this.#storage.scanConversations({ ownerTaskId: record.id }, SCAN_PAGE_SIZE, cursor, context),
+				storage.scanConversations({ ownerTaskId: record.id }, SCAN_PAGE_SIZE, cursor, context),
 			);
 			const conversations = owned.map((conversation) => conversation.id).sort((a, b) => a - b);
 			const subject = blockedSubject(record);
@@ -259,8 +274,8 @@ function publish(mount: Mount, ops: Op[], context: Context, report: (error: unkn
 	if (ops.length === 0) return;
 	mount.value = applyImmutable(mount.value, ops);
 	const frameContext = withoutAbortSignal(context);
-	const change: WatchChange<TaskGraph> = { value: mount.value, ops, retired: false };
-	for (const observer of [...mount.observers]) contained(() => observer.advance(change, frameContext), report);
+	const call: WatchCall<TaskGraph> = { kind: "value", value: mount.value, ops, retired: false };
+	for (const observer of [...mount.observers]) contained(() => observer.advance(call, frameContext), report);
 }
 
 function nodeOf(
@@ -290,7 +305,14 @@ function stateOf(record: AnyTaskRecord): TaskGraphState {
 		case "waiting":
 			return { status: "waiting", phase: phaseOf(state.checkpoint), on: [...state.on], policy: state.policy };
 		case "sleeping":
-			return { status: "sleeping", phase: phaseOf(state.checkpoint), until: state.until };
+			return {
+				status: "sleeping",
+				phase: phaseOf(state.checkpoint),
+				...(state.until === undefined ? {} : { until: state.until }),
+				...(state.signals === undefined
+					? {}
+					: { signals: state.signals.map(({ signal, key }) => ({ signal, key })) }),
+			};
 		// Terminal records never reach here: they leave the graph.
 		case "completing":
 		case "terminal":
